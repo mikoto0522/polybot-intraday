@@ -105,6 +105,7 @@ export class PolymarketRealtime extends EventEmitter {
   private marketReady = false;
   private liveReady = false;
   private marketInitialized = false;
+  private liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     super();
@@ -146,6 +147,10 @@ export class PolymarketRealtime extends EventEmitter {
     this.marketReady = false;
     this.liveReady = false;
     this.marketInitialized = false;
+    if (this.liveRefreshTimer) {
+      clearTimeout(this.liveRefreshTimer);
+      this.liveRefreshTimer = null;
+    }
     this.marketSocket.disconnect();
     this.liveSocket.disconnect();
   }
@@ -234,6 +239,50 @@ export class PolymarketRealtime extends EventEmitter {
         action: 'subscribe',
         subscriptions: chainlinkSubscriptions,
       });
+    }
+
+    // RTDS can occasionally miss symbols when a single subscription burst lands right
+    // after connect. Re-send each symbol with a small stagger as a safety net.
+    this.sendLiveSubscriptionsIndividually();
+    if (this.liveRefreshTimer) {
+      clearTimeout(this.liveRefreshTimer);
+    }
+    this.liveRefreshTimer = setTimeout(() => {
+      this.liveRefreshTimer = null;
+      this.sendLiveSubscriptionsIndividually();
+    }, 1500);
+  }
+
+  private sendLiveSubscriptionsIndividually(): void {
+    if (!this.liveReady) return;
+
+    let delayMs = 0;
+    for (const symbol of this.liveBinanceSymbols) {
+      setTimeout(() => {
+        this.liveSocket.sendJson({
+          action: 'subscribe',
+          subscriptions: [{
+            topic: 'crypto_prices',
+            type: '*',
+            filters: JSON.stringify({ symbol }),
+          }],
+        });
+      }, delayMs);
+      delayMs += 80;
+    }
+
+    for (const symbol of this.liveChainlinkSymbols) {
+      setTimeout(() => {
+        this.liveSocket.sendJson({
+          action: 'subscribe',
+          subscriptions: [{
+            topic: 'crypto_prices_chainlink',
+            type: '*',
+            filters: JSON.stringify({ symbol }),
+          }],
+        });
+      }, delayMs);
+      delayMs += 80;
     }
   }
 
