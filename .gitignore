@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.leadlag-state/
+.env
+startup.log
+startup.err
+startup-livecheck.log
+startup-livecheck.err
+paper.log
