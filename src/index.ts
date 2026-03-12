@@ -331,18 +331,15 @@ class LeadLagBot {
 
     const chain = this.chainlink.get(market.coin);
     const spot = this.binance.get(market.coin);
-    if (!chain) return fail('missing_chainlink');
     if (!spot) return fail('missing_binance');
 
     const now = Date.now();
-    if (now - chain.timestamp > this.config.maxExternalAgeMs) {
-      return fail('stale_chainlink', { ageMs: now - chain.timestamp });
-    }
     if (now - spot.timestamp > this.config.maxExternalAgeMs) {
       return fail('stale_binance', { ageMs: now - spot.timestamp });
     }
 
-    const chainlinkDeltaBps = toBps(chain.price, baseline);
+    const chainAvailable = !!chain && now - chain.timestamp <= this.config.maxExternalAgeMs;
+    const chainlinkDeltaBps = chainAvailable && chain ? toBps(chain.price, baseline) : 0;
     const binanceDeltaBps = toBps(spot.price, baseline);
     const binancePulseBps = this.getBinancePulseBps(market.coin);
     if (Math.abs(binancePulseBps) < this.config.minBinancePulseBps) {
@@ -376,7 +373,7 @@ class LeadLagBot {
       return fail('ask_out_of_range', { ask });
     }
 
-    const chainAligned = Math.sign(chainlinkDeltaBps) === 0 || Math.sign(chainlinkDeltaBps) === Math.sign(binanceDeltaBps);
+    const chainAligned = !chainAvailable || Math.sign(chainlinkDeltaBps) === 0 || Math.sign(chainlinkDeltaBps) === Math.sign(binanceDeltaBps);
     const anchorBonusBps = chainAligned
       ? Math.min(Math.abs(chainlinkDeltaBps), this.config.chainlinkConfirmBps * 2)
       : 0;
@@ -415,6 +412,7 @@ class LeadLagBot {
       marketMid,
       marketLag,
       chainlinkDeltaBps,
+      chainAvailable,
       binanceDeltaBps,
       binancePulseBps,
       leadGapBps,
@@ -435,6 +433,7 @@ class LeadLagBot {
       marketMid: signal.marketMid,
       marketLag: signal.marketLag,
       chainlinkDeltaBps: signal.chainlinkDeltaBps,
+      chainAvailable,
       binanceDeltaBps: signal.binanceDeltaBps,
       binancePulseBps: signal.binancePulseBps,
       leadGapBps: signal.leadGapBps,
