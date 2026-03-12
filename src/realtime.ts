@@ -107,6 +107,7 @@ export class PolymarketRealtime extends EventEmitter {
   private readonly marketTokens = new Set<string>();
   private readonly chainlinkSymbols = new Set<string>();
   private readonly binanceSymbols = new Set<string>();
+  private readonly rtdsBinanceSymbols = new Set<string>();
   private marketReady = false;
   private chainlinkReady = false;
   private binanceReady = false;
@@ -152,7 +153,7 @@ export class PolymarketRealtime extends EventEmitter {
   async connect(timeoutMs = 15000): Promise<void> {
     const waiters = [
       onceConnected(this, 'marketConnected'),
-      onceConnected(this, 'binanceConnected'),
+      onceConnected(this, 'chainlinkConnected'),
     ];
 
     this.marketSocket.connect();
@@ -193,8 +194,13 @@ export class PolymarketRealtime extends EventEmitter {
         this.binanceSymbols.add(lower);
         changed = true;
       }
+      if (!this.rtdsBinanceSymbols.has(lower)) {
+        this.rtdsBinanceSymbols.add(lower);
+        changed = true;
+      }
     }
     if (changed) {
+      this.flushChainlinkSubscriptions();
       this.flushBinanceSubscriptions();
     }
   }
@@ -232,13 +238,23 @@ export class PolymarketRealtime extends EventEmitter {
   }
 
   private flushChainlinkSubscriptions(): void {
-    if (!this.chainlinkReady || this.chainlinkSymbols.size === 0) return;
+    if (!this.chainlinkReady) return;
 
     const subscriptions = [...this.chainlinkSymbols].map((symbol) => ({
       topic: 'crypto_prices_chainlink',
       type: '*',
       filters: JSON.stringify({ symbol }),
     }));
+
+    for (const symbol of this.rtdsBinanceSymbols) {
+      subscriptions.push({
+        topic: 'crypto_prices',
+        type: '*',
+        filters: JSON.stringify({ symbol }),
+      });
+    }
+
+    if (subscriptions.length === 0) return;
 
     this.chainlinkSocket.sendJson({
       action: 'subscribe',
@@ -284,13 +300,17 @@ export class PolymarketRealtime extends EventEmitter {
     }
 
     const record = asRecord(parsed);
-    if (!record || record.topic !== 'crypto_prices_chainlink') return;
+    if (!record || (record.topic !== 'crypto_prices_chainlink' && record.topic !== 'crypto_prices')) return;
     const payload = asRecord(record.payload);
     if (!payload) return;
 
     const price = parseRtdsPrice(payload);
     if (!price) return;
-    this.emit('chainlinkPrice', price);
+    if (record.topic === 'crypto_prices_chainlink') {
+      this.emit('chainlinkPrice', price);
+    } else {
+      this.emit('binancePrice', price);
+    }
   }
 
   private handleBinanceMessage(raw: string): void {
