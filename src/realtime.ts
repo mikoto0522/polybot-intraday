@@ -240,36 +240,43 @@ export class PolymarketRealtime extends EventEmitter {
   private flushChainlinkSubscriptions(): void {
     if (!this.chainlinkReady) return;
 
-    const subscriptions = [...this.chainlinkSymbols].map((symbol) => ({
-      topic: 'crypto_prices_chainlink',
-      type: '*',
-      filters: JSON.stringify({ symbol }),
-    }));
-
-    for (const symbol of this.rtdsBinanceSymbols) {
-      subscriptions.push({
-        topic: 'crypto_prices',
-        type: '*',
-        filters: JSON.stringify({ symbol }),
+    for (const symbol of this.chainlinkSymbols) {
+      this.chainlinkSocket.sendJson({
+        action: 'subscribe',
+        subscriptions: [
+          {
+            topic: 'crypto_prices_chainlink',
+            type: '*',
+            filters: JSON.stringify({ symbol }),
+          },
+        ],
       });
     }
 
-    if (subscriptions.length === 0) return;
-
-    this.chainlinkSocket.sendJson({
-      action: 'subscribe',
-      subscriptions,
-    });
+    for (const symbol of this.rtdsBinanceSymbols) {
+      this.chainlinkSocket.sendJson({
+        action: 'subscribe',
+        subscriptions: [
+          {
+            topic: 'crypto_prices',
+            type: '*',
+            filters: JSON.stringify({ symbol }),
+          },
+        ],
+      });
+    }
   }
 
   private flushBinanceSubscriptions(): void {
     if (!this.binanceReady || this.binanceSymbols.size === 0) return;
 
-    this.binanceSocket.sendJson({
-      method: 'SUBSCRIBE',
-      params: [...this.binanceSymbols].map((symbol) => `${symbol}@trade`),
-      id: Date.now(),
-    });
+    for (const symbol of this.binanceSymbols) {
+      this.binanceSocket.sendJson({
+        method: 'SUBSCRIBE',
+        params: [`${symbol}@trade`],
+        id: Date.now(),
+      });
+    }
   }
 
   private handleMarketMessage(raw: string): void {
