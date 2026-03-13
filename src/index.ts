@@ -83,6 +83,8 @@ class LeadLagBot {
       coins: this.config.coins,
       durations: this.config.durations,
       closeWindowSec: this.config.closeWindowSec,
+      maxOpenPositions: this.config.maxOpenPositions,
+      maxOpenPositionsPerCoin: this.config.maxOpenPositionsPerCoin,
       binanceTriggerBps: this.config.binanceTriggerBps,
       minBinancePulseBps: this.config.minBinancePulseBps,
       minLeadGapBps: this.config.minLeadGapBps,
@@ -268,6 +270,18 @@ class LeadLagBot {
     const openPositions = this.state.getOpenPositions();
     if (openPositions.length >= this.config.maxOpenPositions) return;
     let slotsRemaining = this.config.maxOpenPositions - openPositions.length;
+    if (this.config.mode === 'paper') {
+      slotsRemaining = Math.min(
+        slotsRemaining,
+        Math.floor(this.state.getPaperBalance() / this.config.budget),
+      );
+    }
+    if (slotsRemaining <= 0) return;
+
+    const openByCoin = new Map<Coin, number>();
+    for (const position of openPositions) {
+      openByCoin.set(position.coin, (openByCoin.get(position.coin) || 0) + 1);
+    }
     const candidates: Array<{ market: TrackedMarket; signal: SignalCandidate }> = [];
 
     for (const market of this.markets.values()) {
@@ -286,17 +300,28 @@ class LeadLagBot {
       candidates.push({ market, signal });
     }
 
-    candidates
-      .sort((a, b) => b.signal.score - a.signal.score)
-      .slice(0, slotsRemaining)
-      .forEach(({ market, signal }) => {
-        void this.openPosition(market, signal);
-      });
+    const selected: Array<{ market: TrackedMarket; signal: SignalCandidate }> = [];
+    const reservedByCoin = new Map<Coin, number>();
+    for (const { market, signal } of candidates.sort((a, b) => b.signal.score - a.signal.score)) {
+      if (selected.length >= slotsRemaining) break;
+      const currentCoinOpen = openByCoin.get(market.coin) || 0;
+      const currentCoinReserved = reservedByCoin.get(market.coin) || 0;
+      if (currentCoinOpen + currentCoinReserved >= this.config.maxOpenPositionsPerCoin) {
+        continue;
+      }
+
+      selected.push({ market, signal });
+      reservedByCoin.set(market.coin, currentCoinReserved + 1);
+    }
+
+    for (const { market, signal } of selected) {
+      void this.openPosition(market, signal);
+    }
 
     if (candidates.length > 0) {
       this.replay.record('signal_batch', {
         candidates: candidates.length,
-        selected: Math.min(candidates.length, slotsRemaining),
+        selected: selected.length,
         top: candidates
           .slice(0, Math.min(candidates.length, 5))
           .map(({ market, signal }) => ({
@@ -307,6 +332,12 @@ class LeadLagBot {
             edge: signal.edge,
             ask: signal.ask,
           })),
+        selectedMarkets: selected.map(({ market, signal }) => ({
+          slug: market.slug,
+          coin: market.coin,
+          side: signal.side,
+          score: signal.score,
+        })),
       });
     }
   }

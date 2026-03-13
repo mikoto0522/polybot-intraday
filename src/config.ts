@@ -21,6 +21,7 @@ export interface Config {
   settleDelaySec: number;
   baselineCaptureGraceSec: number;
   maxOpenPositions: number;
+  maxOpenPositionsPerCoin: number;
   coinCooldownSec: number;
   maxExternalAgeMs: number;
   maxBookAgeMs: number;
@@ -80,23 +81,24 @@ export function loadConfig(): Config {
     closeWindowSec: parseFloat(get('close-window-sec', 'CLOSE_WINDOW_SEC', '60')),
     settleDelaySec: parseFloat(get('settle-delay-sec', 'SETTLE_DELAY_SEC', '8')),
     baselineCaptureGraceSec: parseFloat(get('baseline-grace-sec', 'BASELINE_GRACE_SEC', '20')),
-    maxOpenPositions: parseFloat(get('max-open-positions', 'MAX_OPEN_POSITIONS', '12')),
-    coinCooldownSec: parseFloat(get('coin-cooldown-sec', 'COIN_COOLDOWN_SEC', '8')),
-    maxExternalAgeMs: parseFloat(get('max-external-age-ms', 'MAX_EXTERNAL_AGE_MS', '2500')),
-    maxBookAgeMs: parseFloat(get('max-book-age-ms', 'MAX_BOOK_AGE_MS', '2500')),
+    maxOpenPositions: parseFloat(get('max-open-positions', 'MAX_OPEN_POSITIONS', '24')),
+    maxOpenPositionsPerCoin: parseFloat(get('max-open-positions-per-coin', 'MAX_OPEN_POSITIONS_PER_COIN', '6')),
+    coinCooldownSec: parseFloat(get('coin-cooldown-sec', 'COIN_COOLDOWN_SEC', '3')),
+    maxExternalAgeMs: parseFloat(get('max-external-age-ms', 'MAX_EXTERNAL_AGE_MS', '3500')),
+    maxBookAgeMs: parseFloat(get('max-book-age-ms', 'MAX_BOOK_AGE_MS', '4000')),
     binanceLookbackMs: parseFloat(get('binance-lookback-ms', 'BINANCE_LOOKBACK_MS', '5000')),
-    binanceTriggerBps: parseFloat(get('binance-trigger-bps', 'BINANCE_TRIGGER_BPS', '3')),
-    minBinancePulseBps: parseFloat(get('min-binance-pulse-bps', 'MIN_BINANCE_PULSE_BPS', '1.5')),
-    minLeadGapBps: parseFloat(get('min-lead-gap-bps', 'MIN_LEAD_GAP_BPS', '0.75')),
+    binanceTriggerBps: parseFloat(get('binance-trigger-bps', 'BINANCE_TRIGGER_BPS', '2.5')),
+    minBinancePulseBps: parseFloat(get('min-binance-pulse-bps', 'MIN_BINANCE_PULSE_BPS', '1')),
+    minLeadGapBps: parseFloat(get('min-lead-gap-bps', 'MIN_LEAD_GAP_BPS', '0.5')),
     chainlinkConfirmBps: parseFloat(get('chainlink-confirm-bps', 'CHAINLINK_CONFIRM_BPS', '1')),
     chainlinkOpposeBps: parseFloat(get('chainlink-oppose-bps', 'CHAINLINK_OPPOSE_BPS', '2')),
     fairScaleBps: parseFloat(get('fair-scale-bps', 'FAIR_SCALE_BPS', '14')),
-    minEdge: parseFloat(get('min-edge', 'MIN_EDGE', '0.02')),
-    minMarketLag: parseFloat(get('min-market-lag', 'MIN_MARKET_LAG', '0.01')),
+    minEdge: parseFloat(get('min-edge', 'MIN_EDGE', '0.015')),
+    minMarketLag: parseFloat(get('min-market-lag', 'MIN_MARKET_LAG', '0.0075')),
     executionBuffer: parseFloat(get('execution-buffer', 'EXECUTION_BUFFER', '0.01')),
-    maxAsk: parseFloat(get('max-ask', 'MAX_ASK', '0.9')),
-    maxSpread: parseFloat(get('max-spread', 'MAX_SPREAD', '0.15')),
-    minTopBookValue: parseFloat(get('min-top-book-value', 'MIN_TOP_BOOK_VALUE', '5')),
+    maxAsk: parseFloat(get('max-ask', 'MAX_ASK', '0.97')),
+    maxSpread: parseFloat(get('max-spread', 'MAX_SPREAD', '0.18')),
+    minTopBookValue: parseFloat(get('min-top-book-value', 'MIN_TOP_BOOK_VALUE', '3')),
     coins: parseCoins(get('coins', 'COINS', 'BTC,ETH,SOL,XRP')),
     durations: parseDurations(get('durations', 'DURATIONS', '5m,15m')),
   };
