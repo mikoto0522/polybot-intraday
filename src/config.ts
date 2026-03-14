@@ -12,6 +12,7 @@ export interface Config {
   dataDir: string;
   replayDir: string;
   replayEnabled: boolean;
+  replayTicksEnabled: boolean;
   replayTickMinMs: number;
   scanSec: number;
   evalMs: number;
@@ -73,6 +74,7 @@ export function loadConfig(): Config {
     dataDir: get('data-dir', 'DATA_DIR', '.leadlag-state'),
     replayDir: get('replay-dir', 'REPLAY_DIR', 'replay'),
     replayEnabled: get('replay-enabled', 'REPLAY_ENABLED', 'true') === 'true',
+    replayTicksEnabled: get('replay-ticks-enabled', 'REPLAY_TICKS_ENABLED', mode === 'live' ? 'false' : 'true') === 'true',
     replayTickMinMs: parseFloat(get('replay-tick-min-ms', 'REPLAY_TICK_MIN_MS', '250')),
     scanSec: parseFloat(get('scan-sec', 'SCAN_SEC', '20')),
     evalMs: parseFloat(get('eval-ms', 'EVAL_MS', '500')),
@@ -99,7 +101,7 @@ export function loadConfig(): Config {
     maxAsk: parseFloat(get('max-ask', 'MAX_ASK', '0.97')),
     maxSpread: parseFloat(get('max-spread', 'MAX_SPREAD', '0.18')),
     minTopBookValue: parseFloat(get('min-top-book-value', 'MIN_TOP_BOOK_VALUE', '3')),
-    coins: parseCoins(get('coins', 'COINS', 'BTC,ETH,SOL,XRP')),
+    coins: parseCoins(get('coins', 'COINS', 'BTC,ETH')),
     durations: parseDurations(get('durations', 'DURATIONS', '5m,15m')),
   };
 }
@@ -108,7 +110,7 @@ function parseCoins(value: string): Coin[] {
   return value
     .split(',')
     .map((item) => item.trim().toUpperCase())
-    .filter((item): item is Coin => ['BTC', 'ETH', 'SOL', 'XRP'].includes(item));
+    .filter((item): item is Coin => ['BTC', 'ETH'].includes(item));
 }
 
 function parseDurations(value: string): Duration[] {

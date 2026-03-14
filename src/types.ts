@@ -124,7 +124,9 @@ export interface SignalCandidate {
   marketMid: number;
   marketLag: number;
   chainlinkDeltaBps: number;
+  chainAvailable?: boolean;
   binanceDeltaBps: number;
   binancePulseBps: number;
   leadGapBps: number;
+  marketToDecisionMs: number;
 }

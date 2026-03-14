@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig, type Config } from './config.js';
+import { LatencyTracker } from './latency.js';
 import { LiveTradingClient } from './live.js';
 import { Logger } from './logger.js';
 import { fetchClobMarket, fetchGammaMarketBySlug } from './polymarket-api.js';
@@ -40,6 +41,7 @@ class LeadLagBot {
   private readonly state: StateStore;
   private readonly replay: ReplayRecorder;
   private readonly realtime = new PolymarketRealtime();
+  private readonly latency = new LatencyTracker();
   private live: LiveTradingClient | null = null;
 
   private readonly markets = new Map<string, TrackedMarket>();
@@ -50,6 +52,10 @@ class LeadLagBot {
   private readonly subscribedMarkets = new Set<string>();
   private readonly coinCooldownUntil = new Map<Coin, number>();
   private readonly rejectCounts = new Map<string, number>();
+  private readonly tokenToCondition = new Map<string, string>();
+  private readonly coinToConditions = new Map<Coin, Set<string>>();
+  private readonly dirtyConditions = new Set<string>();
+  private evaluateScheduled = false;
 
   constructor(config: Config) {
     this.config = config;
@@ -58,6 +64,7 @@ class LeadLagBot {
       config.dataDir,
       config.replayDir,
       config.replayEnabled,
+      config.replayTicksEnabled,
       config.replayTickMinMs,
     );
   }
@@ -93,6 +100,7 @@ class LeadLagBot {
       maxAsk: this.config.maxAsk,
       maxSpread: this.config.maxSpread,
       minTopBookValue: this.config.minTopBookValue,
+      replayTicksEnabled: this.config.replayTicksEnabled,
     });
 
     this.realtime.on('orderbook', (book: OrderbookSnapshot) => this.handleOrderbook(book));
@@ -114,8 +122,8 @@ class LeadLagBot {
     setInterval(() => void this.settlePositions(), this.config.settleSec * 1000);
     setInterval(() => this.printStatus(), this.config.statusSec * 1000);
 
-    process.on('SIGINT', () => this.shutdown());
-    process.on('SIGTERM', () => this.shutdown());
+    process.on('SIGINT', () => void this.shutdown());
+    process.on('SIGTERM', () => void this.shutdown());
 
     this.log.info('Lead-lag engine is running.');
     await new Promise(() => undefined);
@@ -152,6 +160,7 @@ class LeadLagBot {
       history.shift();
     }
     this.binanceHistory.set(coin, history);
+    this.markCoinDirty(coin);
   }
 
   private handleChainlinkPrice(price: CryptoPrice): void {
@@ -168,6 +177,8 @@ class LeadLagBot {
       price: price.price,
       timestamp: price.timestamp,
     });
+    this.captureBaselines(coin);
+    this.markCoinDirty(coin);
   }
 
   private async discoverMarkets(): Promise<void> {
@@ -189,6 +200,7 @@ class LeadLagBot {
         }
 
         this.markets.set(meta.conditionId, meta);
+        this.registerMarket(meta);
         this.subscribeMarket(meta);
         this.log.info(`[+MKT] ${meta.slug} | ${meta.question}`);
         this.replay.record('market_discovered', {
@@ -239,11 +251,16 @@ class LeadLagBot {
       spread: ask > 0 && bid > 0 ? ask - bid : 1,
       timestamp: Date.now(),
     });
+    const conditionId = this.tokenToCondition.get(book.assetId);
+    if (conditionId) {
+      this.markConditionDirty(conditionId);
+    }
   }
 
-  private captureBaselines(): void {
+  private captureBaselines(targetCoin?: Coin): void {
     const now = Date.now();
     for (const market of this.markets.values()) {
+      if (targetCoin && market.coin !== targetCoin) continue;
       if (market.baseline != null) continue;
 
       const tick = this.chainlink.get(market.coin);
@@ -265,7 +282,7 @@ class LeadLagBot {
     }
   }
 
-  private evaluateMarkets(): void {
+  private evaluateMarkets(conditionIds?: Iterable<string>): void {
     const now = Date.now();
     const openPositions = this.state.getOpenPositions();
     if (openPositions.length >= this.config.maxOpenPositions) return;
@@ -283,8 +300,13 @@ class LeadLagBot {
       openByCoin.set(position.coin, (openByCoin.get(position.coin) || 0) + 1);
     }
     const candidates: Array<{ market: TrackedMarket; signal: SignalCandidate }> = [];
+    const scope = conditionIds
+      ? [...new Set(conditionIds)]
+          .map((conditionId) => this.markets.get(conditionId))
+          .filter((market): market is TrackedMarket => !!market)
+      : [...this.markets.values()];
 
-    for (const market of this.markets.values()) {
+    for (const market of scope) {
       if (this.state.hasOpenPosition(market.conditionId)) continue;
       if (market.baseline == null) continue;
       if (now < market.startTime) continue;
@@ -432,6 +454,17 @@ class LeadLagBot {
       - askBook.spread * 30
       - ask * 4;
 
+    const marketToDecisionMs = Math.max(
+      0,
+      now - Math.max(
+        spot.timestamp,
+        askBook.timestamp,
+        upBook.timestamp,
+        downBook.timestamp,
+        chainAvailable && chain ? chain.timestamp : 0,
+      ),
+    );
+
     const signal = {
       side: direction,
       score,
@@ -447,7 +480,10 @@ class LeadLagBot {
       binanceDeltaBps,
       binancePulseBps,
       leadGapBps,
+      marketToDecisionMs,
     };
+
+    this.latency.record('market_to_decision', marketToDecisionMs);
 
     this.replay.record('signal', {
       conditionId: market.conditionId,
@@ -468,6 +504,7 @@ class LeadLagBot {
       binanceDeltaBps: signal.binanceDeltaBps,
       binancePulseBps: signal.binancePulseBps,
       leadGapBps: signal.leadGapBps,
+      marketToDecisionMs,
       baseline,
       timeRemainingSec,
     });
@@ -494,8 +531,10 @@ class LeadLagBot {
       `chain=${signal.chainlinkDeltaBps.toFixed(1)}bps gap=${signal.leadGapBps.toFixed(1)}bps`,
     );
     this.coinCooldownUntil.set(market.coin, Date.now() + this.config.coinCooldownSec * 1000);
+    const decisionStartedAt = Date.now();
 
     if (this.config.mode === 'dry-run') {
+      this.latency.record('decision_to_order', Date.now() - decisionStartedAt);
       this.replay.record('entry_dry_run', {
         conditionId: market.conditionId,
         slug: market.slug,
@@ -509,12 +548,16 @@ class LeadLagBot {
         chainlinkDeltaBps: signal.chainlinkDeltaBps,
         binancePulseBps: signal.binancePulseBps,
         leadGapBps: signal.leadGapBps,
+        marketToDecisionMs: signal.marketToDecisionMs,
+        decisionToOrderMs: Date.now() - decisionStartedAt,
       });
       return;
     }
 
     if (this.config.mode === 'live') {
       const result = await this.live!.createMarketBuy(tokenId, this.config.budget);
+      const decisionToOrderMs = Date.now() - decisionStartedAt;
+      this.latency.record('decision_to_order', decisionToOrderMs);
       if (!result.success) {
         this.log.warn(`[LIVE FAIL] ${market.slug} ${signal.side} ${result.errorMsg || 'unknown error'}`);
         this.replay.record('entry_failed', {
@@ -523,6 +566,8 @@ class LeadLagBot {
           slug: market.slug,
           side: signal.side,
           error: result.errorMsg || 'unknown error',
+          marketToDecisionMs: signal.marketToDecisionMs,
+          decisionToOrderMs,
         });
         return;
       }
@@ -537,10 +582,14 @@ class LeadLagBot {
         shares,
         edge: signal.edge,
         marketLag: signal.marketLag,
+        marketToDecisionMs: signal.marketToDecisionMs,
+        decisionToOrderMs,
         orderId: result.orderId,
         transactionHashes: result.transactionHashes,
       });
     } else {
+      const decisionToOrderMs = Date.now() - decisionStartedAt;
+      this.latency.record('decision_to_order', decisionToOrderMs);
       this.state.setPaperBalance(this.state.getPaperBalance() - this.config.budget);
       this.replay.record('entry_paper', {
         conditionId: market.conditionId,
@@ -552,6 +601,8 @@ class LeadLagBot {
         shares,
         edge: signal.edge,
         marketLag: signal.marketLag,
+        marketToDecisionMs: signal.marketToDecisionMs,
+        decisionToOrderMs,
         paperBalance: this.state.getPaperBalance(),
       });
     }
@@ -669,6 +720,12 @@ class LeadLagBot {
       `Rejects=${topRejects || 'none'}`,
     );
 
+    const m2d = this.latency.summarize('market_to_decision');
+    const d2o = this.latency.summarize('decision_to_order');
+    this.log.info(
+      `[LAT] M->D ${formatLatencySummary(m2d)} | D->O ${formatLatencySummary(d2o)}`,
+    );
+
     for (const position of openPositions.slice(-5)) {
       this.log.info(
         `[OPEN] ${position.side} ${position.slug} stake=$${position.stake.toFixed(2)} ` +
@@ -684,10 +741,52 @@ class LeadLagBot {
       if (this.state.hasOpenPosition(conditionId)) continue;
       this.markets.delete(conditionId);
       this.subscribedMarkets.delete(conditionId);
+      this.tokenToCondition.delete(market.upTokenId);
+      this.tokenToCondition.delete(market.downTokenId);
+      this.dirtyConditions.delete(conditionId);
+      const perCoin = this.coinToConditions.get(market.coin);
+      perCoin?.delete(conditionId);
+      if (perCoin && perCoin.size === 0) {
+        this.coinToConditions.delete(market.coin);
+      }
     }
   }
 
-  private shutdown(): void {
+  private registerMarket(market: TrackedMarket): void {
+    this.tokenToCondition.set(market.upTokenId, market.conditionId);
+    this.tokenToCondition.set(market.downTokenId, market.conditionId);
+    const perCoin = this.coinToConditions.get(market.coin) || new Set<string>();
+    perCoin.add(market.conditionId);
+    this.coinToConditions.set(market.coin, perCoin);
+    this.markConditionDirty(market.conditionId);
+  }
+
+  private markCoinDirty(coin: Coin): void {
+    for (const conditionId of this.coinToConditions.get(coin) || []) {
+      this.dirtyConditions.add(conditionId);
+    }
+    this.scheduleDirtyEvaluation();
+  }
+
+  private markConditionDirty(conditionId: string): void {
+    this.dirtyConditions.add(conditionId);
+    this.scheduleDirtyEvaluation();
+  }
+
+  private scheduleDirtyEvaluation(): void {
+    if (this.evaluateScheduled) return;
+    this.evaluateScheduled = true;
+    setImmediate(() => {
+      this.evaluateScheduled = false;
+      if (this.dirtyConditions.size === 0) return;
+      const dirty = [...this.dirtyConditions];
+      this.dirtyConditions.clear();
+      this.captureBaselines();
+      this.evaluateMarkets(dirty);
+    });
+  }
+
+  private async shutdown(): Promise<void> {
     this.log.info('Shutting down...');
     const state = this.state.getState();
     const openPositions = state.positions.filter((position) => !position.settledAt);
@@ -699,9 +798,16 @@ class LeadLagBot {
       realized,
       paperBalance: this.state.getPaperBalance(),
     });
+    this.state.flush();
     this.realtime.disconnect();
+    await this.replay.close();
     process.exit(0);
   }
+}
+
+function formatLatencySummary(summary: ReturnType<LatencyTracker['summarize']>): string {
+  if (!summary) return 'n/a';
+  return `n=${summary.count} p50=${summary.p50.toFixed(1)}ms p95=${summary.p95.toFixed(1)}ms max=${summary.max.toFixed(1)}ms`;
 }
 
 function generateCandidateSlugs(coins: Coin[], durations: Duration[]): string[] {
