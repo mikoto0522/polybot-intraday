@@ -519,7 +519,8 @@ class LeadLagBot {
     if (this.state.hasOpenPosition(market.conditionId)) return;
 
     const tokenId = signal.side === 'UP' ? market.upTokenId : market.downTokenId;
-    const shares = this.config.budget / signal.ask;
+    let fillAsk = signal.ask;
+    let shares = this.config.budget / fillAsk;
 
     if (this.config.mode === 'paper' && this.state.getPaperBalance() < this.config.budget) {
       this.log.warn(`[SKIP] Paper balance too low for ${market.slug}`);
@@ -580,7 +581,7 @@ class LeadLagBot {
         slug: market.slug,
         side: signal.side,
         score: signal.score,
-        ask: signal.ask,
+        ask: fillAsk,
         stake: this.config.budget,
         shares,
         edge: signal.edge,
@@ -591,6 +592,31 @@ class LeadLagBot {
         transactionHashes: result.transactionHashes,
       });
     } else {
+      const fillDelayMs = randomIntInclusive(
+        Math.min(this.config.paperExecutionDelayMinMs, this.config.paperExecutionDelayMaxMs),
+        Math.max(this.config.paperExecutionDelayMinMs, this.config.paperExecutionDelayMaxMs),
+      );
+      await sleep(fillDelayMs);
+
+      const fillBook = this.getActiveAskBook(market, signal.side);
+      const fillNow = Date.now();
+      if (!fillBook || fillNow - fillBook.timestamp > this.config.maxBookAgeMs || fillBook.bestAsk <= 0) {
+        this.log.warn(`[PAPER SKIP] ${market.slug} ${signal.side} no fresh ask after ${fillDelayMs}ms`);
+        this.replay.record('entry_failed', {
+          mode: this.config.mode,
+          conditionId: market.conditionId,
+          slug: market.slug,
+          side: signal.side,
+          error: 'paper_fill_unavailable',
+          paperDelayMs: fillDelayMs,
+          marketToDecisionMs: signal.marketToDecisionMs,
+          decisionToOrderMs: fillNow - decisionStartedAt,
+        });
+        return;
+      }
+
+      fillAsk = fillBook.bestAsk;
+      shares = this.config.budget / fillAsk;
       const decisionToOrderMs = Date.now() - decisionStartedAt;
       this.latency.record('decision_to_order', decisionToOrderMs);
       this.state.setPaperBalance(this.state.getPaperBalance() - this.config.budget);
@@ -599,13 +625,14 @@ class LeadLagBot {
         slug: market.slug,
         side: signal.side,
         score: signal.score,
-        ask: signal.ask,
+        ask: fillAsk,
         stake: this.config.budget,
         shares,
         edge: signal.edge,
         marketLag: signal.marketLag,
         marketToDecisionMs: signal.marketToDecisionMs,
         decisionToOrderMs,
+        paperDelayMs: fillDelayMs,
         paperBalance: this.state.getPaperBalance(),
       });
     }
@@ -623,7 +650,7 @@ class LeadLagBot {
       downTokenId: market.downTokenId,
       baseline: market.baseline!,
       stake: this.config.budget,
-      entryPrice: signal.ask,
+      entryPrice: fillAsk,
       shares,
       openedAt: Date.now(),
       endTime: market.endTime,
@@ -819,6 +846,12 @@ class LeadLagBot {
       })
       .join(' | ');
   }
+
+  private getActiveAskBook(market: TrackedMarket, side: Side): TokenBook | undefined {
+    return side === 'UP'
+      ? this.orderbooks.get(market.upTokenId)
+      : this.orderbooks.get(market.downTokenId);
+  }
 }
 
 function formatLatencySummary(summary: ReturnType<LatencyTracker['summarize']>): string {
@@ -830,6 +863,15 @@ function formatAgeMs(timestamp: number | undefined, now: number): string {
   if (!timestamp) return 'n/a';
   const age = Math.max(0, now - timestamp);
   return `${age}ms`;
+}
+
+function randomIntInclusive(min: number, max: number): number {
+  if (max <= min) return min;
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function generateCandidateSlugs(coins: Coin[], durations: Duration[]): string[] {

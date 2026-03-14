@@ -14,6 +14,8 @@ export interface Config {
   replayEnabled: boolean;
   replayTicksEnabled: boolean;
   replayTickMinMs: number;
+  paperExecutionDelayMinMs: number;
+  paperExecutionDelayMaxMs: number;
   scanSec: number;
   evalMs: number;
   statusSec: number;
@@ -76,6 +78,8 @@ export function loadConfig(): Config {
     replayEnabled: get('replay-enabled', 'REPLAY_ENABLED', 'true') === 'true',
     replayTicksEnabled: get('replay-ticks-enabled', 'REPLAY_TICKS_ENABLED', mode === 'live' ? 'false' : 'true') === 'true',
     replayTickMinMs: parseFloat(get('replay-tick-min-ms', 'REPLAY_TICK_MIN_MS', '250')),
+    paperExecutionDelayMinMs: parseFloat(get('paper-execution-delay-min-ms', 'PAPER_EXECUTION_DELAY_MIN_MS', '100')),
+    paperExecutionDelayMaxMs: parseFloat(get('paper-execution-delay-max-ms', 'PAPER_EXECUTION_DELAY_MAX_MS', '300')),
     scanSec: parseFloat(get('scan-sec', 'SCAN_SEC', '20')),
     evalMs: parseFloat(get('eval-ms', 'EVAL_MS', '500')),
     statusSec: parseFloat(get('status-sec', 'STATUS_SEC', '30')),
