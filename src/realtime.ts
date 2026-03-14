@@ -102,16 +102,15 @@ class ManagedSocket {
 
 export class PolymarketRealtime extends EventEmitter {
   private readonly marketSocket: ManagedSocket;
-  private readonly chainlinkSocket: ManagedSocket;
-  private readonly binanceSocket: ManagedSocket;
   private readonly marketTokens = new Set<string>();
   private readonly chainlinkSymbols = new Set<string>();
   private readonly binanceSymbols = new Set<string>();
   private readonly rtdsBinanceSymbols = new Set<string>();
+  private readonly rtdsSockets = new Map<string, ManagedSocket>();
+  private readonly binanceSockets = new Map<string, ManagedSocket>();
   private marketReady = false;
-  private chainlinkReady = false;
-  private binanceReady = false;
   private marketInitialized = false;
+  private started = false;
 
   constructor() {
     super();
@@ -128,49 +127,33 @@ export class PolymarketRealtime extends EventEmitter {
       onMessage: (raw) => this.handleMarketMessage(raw),
     });
 
-    this.chainlinkSocket = new ManagedSocket({
-      url: LIVE_WS,
-      onOpen: () => {
-        this.chainlinkReady = true;
-        this.chainlinkSocket.setPing(true);
-        this.flushChainlinkSubscriptions();
-        this.emit('chainlinkConnected');
-      },
-      onMessage: (raw) => this.handleChainlinkMessage(raw),
-    });
-
-    this.binanceSocket = new ManagedSocket({
-      url: BINANCE_WS,
-      onOpen: () => {
-        this.binanceReady = true;
-        this.flushBinanceSubscriptions();
-        this.emit('binanceConnected');
-      },
-      onMessage: (raw) => this.handleBinanceMessage(raw),
-    });
   }
 
   async connect(timeoutMs = 15000): Promise<void> {
-    const waiters = [
-      onceConnected(this, 'marketConnected'),
-      onceConnected(this, 'chainlinkConnected'),
-    ];
+    this.started = true;
+    const waiters = [onceConnected(this, 'marketConnected')];
 
     this.marketSocket.connect();
-    this.chainlinkSocket.connect();
-    this.binanceSocket.connect();
+    for (const socket of this.rtdsSockets.values()) {
+      socket.connect();
+    }
+    for (const socket of this.binanceSockets.values()) {
+      socket.connect();
+    }
 
     await promiseWithTimeout(Promise.all(waiters).then(() => undefined), timeoutMs, 'WebSocket timeout');
   }
 
   disconnect(): void {
     this.marketReady = false;
-    this.chainlinkReady = false;
-    this.binanceReady = false;
     this.marketInitialized = false;
     this.marketSocket.disconnect();
-    this.chainlinkSocket.disconnect();
-    this.binanceSocket.disconnect();
+    for (const socket of this.rtdsSockets.values()) {
+      socket.disconnect();
+    }
+    for (const socket of this.binanceSockets.values()) {
+      socket.disconnect();
+    }
   }
 
   subscribeMarkets(tokenIds: string[]): void {
@@ -200,8 +183,7 @@ export class PolymarketRealtime extends EventEmitter {
       }
     }
     if (changed) {
-      this.flushChainlinkSubscriptions();
-      this.flushBinanceSubscriptions();
+      this.ensureExternalSockets();
     }
   }
 
@@ -215,7 +197,7 @@ export class PolymarketRealtime extends EventEmitter {
       }
     }
     if (changed) {
-      this.flushChainlinkSubscriptions();
+      this.ensureExternalSockets();
     }
   }
 
@@ -235,48 +217,6 @@ export class PolymarketRealtime extends EventEmitter {
       operation: 'subscribe',
       assets_ids: assetIds,
     });
-  }
-
-  private flushChainlinkSubscriptions(): void {
-    if (!this.chainlinkReady) return;
-
-    for (const symbol of this.chainlinkSymbols) {
-      this.chainlinkSocket.sendJson({
-        action: 'subscribe',
-        subscriptions: [
-          {
-            topic: 'crypto_prices_chainlink',
-            type: '*',
-            filters: JSON.stringify({ symbol }),
-          },
-        ],
-      });
-    }
-
-    for (const symbol of this.rtdsBinanceSymbols) {
-      this.chainlinkSocket.sendJson({
-        action: 'subscribe',
-        subscriptions: [
-          {
-            topic: 'crypto_prices',
-            type: '*',
-            filters: JSON.stringify({ symbol }),
-          },
-        ],
-      });
-    }
-  }
-
-  private flushBinanceSubscriptions(): void {
-    if (!this.binanceReady || this.binanceSymbols.size === 0) return;
-
-    for (const symbol of this.binanceSymbols) {
-      this.binanceSocket.sendJson({
-        method: 'SUBSCRIBE',
-        params: [`${symbol}@trade`],
-        id: Date.now(),
-      });
-    }
   }
 
   private handleMarketMessage(raw: string): void {
@@ -347,6 +287,83 @@ export class PolymarketRealtime extends EventEmitter {
       price,
       timestamp: eventTime || Date.now(),
     } satisfies CryptoPrice);
+  }
+
+  private ensureExternalSockets(): void {
+    const symbols = new Set<string>([
+      ...this.chainlinkSymbols,
+      ...this.rtdsBinanceSymbols,
+      ...this.binanceSymbols,
+    ]);
+
+    for (const symbol of symbols) {
+      this.ensureRtdsSocket(symbol);
+      if (this.binanceSymbols.has(symbol)) {
+        this.ensureBinanceSocket(symbol);
+      }
+    }
+  }
+
+  private ensureRtdsSocket(symbol: string): void {
+    if (this.rtdsSockets.has(symbol)) return;
+
+    const socket = new ManagedSocket({
+      url: LIVE_WS,
+      onOpen: () => {
+        socket.setPing(true);
+        if (this.chainlinkSymbols.has(symbol)) {
+          socket.sendJson({
+            action: 'subscribe',
+            subscriptions: [
+              {
+                topic: 'crypto_prices_chainlink',
+                type: '*',
+                filters: JSON.stringify({ symbol }),
+              },
+            ],
+          });
+        }
+        if (this.rtdsBinanceSymbols.has(symbol)) {
+          socket.sendJson({
+            action: 'subscribe',
+            subscriptions: [
+              {
+                topic: 'crypto_prices',
+                type: '*',
+                filters: JSON.stringify({ symbol }),
+              },
+            ],
+          });
+        }
+      },
+      onMessage: (raw) => this.handleChainlinkMessage(raw),
+    });
+
+    this.rtdsSockets.set(symbol, socket);
+    if (this.started) {
+      socket.connect();
+    }
+  }
+
+  private ensureBinanceSocket(symbol: string): void {
+    if (this.binanceSockets.has(symbol)) return;
+
+    const socket = new ManagedSocket({
+      url: BINANCE_WS,
+      onOpen: () => {
+        socket.sendJson({
+          method: 'SUBSCRIBE',
+          params: [`${symbol}@trade`],
+          id: Date.now(),
+        });
+      },
+      onMessage: (raw) => this.handleBinanceMessage(raw),
+    });
+
+    this.binanceSockets.set(symbol, socket);
+    if (this.started) {
+      socket.connect();
+    }
   }
 }
 

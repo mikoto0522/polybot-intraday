@@ -107,9 +107,8 @@ class LeadLagBot {
     this.realtime.on('orderbook', (book: OrderbookSnapshot) => this.handleOrderbook(book));
     this.realtime.on('binancePrice', (price: CryptoPrice) => this.handleBinancePrice(price));
     this.realtime.on('chainlinkPrice', (price: CryptoPrice) => this.handleChainlinkPrice(price));
-    await this.realtime.connect();
-
     this.subscribeExternalPrices();
+    await this.realtime.connect();
     await this.discoverMarkets();
     this.captureBaselines();
     this.evaluateMarkets();
