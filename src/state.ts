@@ -5,6 +5,7 @@ import type { OpenPosition, StoredState } from './types.js';
 export class StateStore {
   private readonly filePath: string;
   private state: StoredState;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(dataDir: string, paperBalance: number) {
     this.filePath = path.join(dataDir, 'state.json');
@@ -23,7 +24,7 @@ export class StateStore {
 
   setPaperBalance(value: number): void {
     this.state.paperBalance = value;
-    this.save();
+    this.scheduleSave();
   }
 
   getBaseline(conditionId: string): { value: number; capturedAt: number } | undefined {
@@ -32,7 +33,7 @@ export class StateStore {
 
   setBaseline(conditionId: string, value: number, capturedAt: number): void {
     this.state.baselines[conditionId] = { value, capturedAt };
-    this.save();
+    this.scheduleSave();
   }
 
   getOpenPositions(): OpenPosition[] {
@@ -45,7 +46,7 @@ export class StateStore {
 
   addPosition(position: OpenPosition): void {
     this.state.positions.push(position);
-    this.save();
+    this.scheduleSave();
   }
 
   settlePosition(id: string, payout: number, realizedPnl: number): void {
@@ -54,7 +55,7 @@ export class StateStore {
     pos.payout = payout;
     pos.realizedPnl = realizedPnl;
     pos.settledAt = Date.now();
-    this.save();
+    this.scheduleSave();
   }
 
   getState(): StoredState {
@@ -69,6 +70,22 @@ export class StateStore {
     } catch {
       return null;
     }
+  }
+
+  flush(): void {
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
+    this.save();
+  }
+
+  private scheduleSave(): void {
+    if (this.saveTimer) return;
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null;
+      this.save();
+    }, 50);
   }
 
   private save(): void {
