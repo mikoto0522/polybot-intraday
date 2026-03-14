@@ -261,6 +261,7 @@ export class PolymarketRealtime extends EventEmitter {
   }
 
   private handleBinanceMessage(raw: string): void {
+    const receivedAt = Date.now();
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -279,13 +280,12 @@ export class PolymarketRealtime extends EventEmitter {
 
     const symbol = stringValue(data.s);
     const price = numberValue(data.p);
-    const eventTime = numberValue(data.E);
     if (!symbol || !Number.isFinite(price) || price <= 0) return;
 
     this.emit('binancePrice', {
       symbol: symbol.toLowerCase(),
       price,
-      timestamp: eventTime || Date.now(),
+      timestamp: receivedAt,
     } satisfies CryptoPrice);
   }
 
