@@ -276,10 +276,16 @@ export class PolymarketRealtime extends EventEmitter {
     const stream = stringValue(record.stream);
     const data = asRecord(record.data);
     if (!stream || !data) return;
-    if (!stream.endsWith('@trade')) return;
+    if (!stream.endsWith('@bookTicker')) return;
 
     const symbol = stringValue(data.s);
-    const price = numberValue(data.p);
+    const bestBid = numberValue(data.b);
+    const bestAsk = numberValue(data.a);
+    const price = bestBid > 0 && bestAsk > 0
+      ? (bestBid + bestAsk) / 2
+      : bestBid > 0
+        ? bestBid
+        : bestAsk;
     if (!symbol || !Number.isFinite(price) || price <= 0) return;
 
     this.emit('binancePrice', {
@@ -353,7 +359,7 @@ export class PolymarketRealtime extends EventEmitter {
       onOpen: () => {
         socket.sendJson({
           method: 'SUBSCRIBE',
-          params: [`${symbol}@trade`],
+          params: [`${symbol}@bookTicker`],
           id: Date.now(),
         });
       },
