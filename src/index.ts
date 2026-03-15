@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { loadConfig, type Config } from './config.js';
 import { LatencyTracker } from './latency.js';
-import { LiveTradingClient } from './live.js';
+import { LiveTradingClient, type LiveWalletBalances } from './live.js';
 import { Logger } from './logger.js';
 import { fetchClobMarket, fetchGammaMarketBySlug } from './polymarket-api.js';
 import { PolymarketRealtime } from './realtime.js';
@@ -43,6 +43,7 @@ class LeadLagBot {
   private readonly realtime = new PolymarketRealtime();
   private readonly latency = new LatencyTracker();
   private live: LiveTradingClient | null = null;
+  private liveBalances: LiveWalletBalances | null = null;
 
   private readonly markets = new Map<string, TrackedMarket>();
   private readonly orderbooks = new Map<string, TokenBook>();
@@ -78,6 +79,7 @@ class LeadLagBot {
         chainId: this.config.chainId,
       });
       await this.live.initialize();
+      this.liveBalances = await this.live.getWalletBalances().catch(() => null);
       this.log.info(`Live wallet: ${this.live.getAddress()}`);
     }
 
@@ -120,7 +122,7 @@ class LeadLagBot {
       this.evaluateMarkets();
     }, this.config.evalMs);
     setInterval(() => void this.settlePositions(), this.config.settleSec * 1000);
-    setInterval(() => this.printStatus(), this.config.statusSec * 1000);
+    setInterval(() => void this.printStatus(), this.config.statusSec * 1000);
 
     process.on('SIGINT', () => void this.shutdown());
     process.on('SIGTERM', () => void this.shutdown());
@@ -733,7 +735,7 @@ class LeadLagBot {
     return ((latest.price - reference.price) / reference.price) * 10_000;
   }
 
-  private printStatus(): void {
+  private async printStatus(): Promise<void> {
     const state = this.state.getState();
     const openPositions = state.positions.filter((position) => !position.settledAt);
     const settled = state.positions.filter((position) => position.settledAt);
@@ -743,10 +745,19 @@ class LeadLagBot {
       .slice(0, 3)
       .map(([reason, count]) => `${reason}:${count}`)
       .join(', ');
+
+    if (this.config.mode === 'live' && this.live) {
+      this.liveBalances = await this.live.getWalletBalances().catch(() => this.liveBalances);
+    }
+
+    const balanceText = this.config.mode === 'live'
+      ? `USDC=$${formatLiveBalance(this.liveBalances?.usdc)} | POL=${formatLiveBalance(this.liveBalances?.pol, 4)}`
+      : `Paper=$${this.state.getPaperBalance().toFixed(2)}`;
+
     this.log.status(
       `Mode=${this.config.mode} | Markets=${this.markets.size} | ` +
       `Open=${openPositions.length} | Settled=${settled.length} | ` +
-      `Paper=$${this.state.getPaperBalance().toFixed(2)} | Realized=$${realized.toFixed(2)} | ` +
+      `${balanceText} | Realized=$${realized.toFixed(2)} | ` +
       `Rejects=${topRejects || 'none'}`,
     );
 
@@ -857,6 +868,12 @@ class LeadLagBot {
 function formatLatencySummary(summary: ReturnType<LatencyTracker['summarize']>): string {
   if (!summary) return 'n/a';
   return `n=${summary.count} p50=${summary.p50.toFixed(1)}ms p95=${summary.p95.toFixed(1)}ms max=${summary.max.toFixed(1)}ms`;
+}
+
+function formatLiveBalance(value: string | undefined, decimals = 2): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 'n/a';
+  return numeric.toFixed(decimals);
 }
 
 function formatAgeMs(timestamp: number | undefined, now: number): string {

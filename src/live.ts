@@ -14,6 +14,10 @@ const CTF_ABI = [
   'function balanceOf(address account, uint256 positionId) view returns (uint256)',
 ];
 
+const ERC20_ABI = [
+  'function balanceOf(address account) view returns (uint256)',
+];
+
 export interface LiveTradingConfig {
   privateKey: string;
   rpcUrl?: string;
@@ -34,10 +38,16 @@ export interface RedeemResult {
   tokensRedeemed: string;
 }
 
+export interface LiveWalletBalances {
+  usdc: string;
+  pol: string;
+}
+
 export class LiveTradingClient {
   private readonly wallet: Wallet;
   private readonly provider: ethers.providers.JsonRpcProvider;
   private readonly ctfContract: Contract;
+  private readonly usdcContract: Contract;
   private readonly chainId: number;
   private clobClient: ClobClient | null = null;
   private initialized = false;
@@ -51,6 +61,7 @@ export class LiveTradingClient {
     this.provider = new ethers.providers.JsonRpcProvider(rpcUrl, this.chainId);
     this.wallet = new Wallet(config.privateKey, this.provider);
     this.ctfContract = new Contract(CTF_CONTRACT, CTF_ABI, this.wallet);
+    this.usdcContract = new Contract(USDC_CONTRACT, ERC20_ABI, this.provider);
   }
 
   getAddress(): string {
@@ -119,6 +130,17 @@ export class LiveTradingClient {
         errorMsg: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  async getWalletBalances(): Promise<LiveWalletBalances> {
+    const [usdcRaw, polRaw] = await Promise.all([
+      this.usdcContract.balanceOf(this.wallet.address),
+      this.provider.getBalance(this.wallet.address),
+    ]);
+    return {
+      usdc: ethers.utils.formatUnits(usdcRaw, USDC_DECIMALS),
+      pol: ethers.utils.formatEther(polRaw),
+    };
   }
 
   async redeemByTokenIds(
