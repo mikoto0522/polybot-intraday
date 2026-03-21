@@ -108,7 +108,7 @@ export function loadConfig(): Config {
     dataDir: get('data-dir', 'DATA_DIR', '.leadlag-state'),
     replayDir: get('replay-dir', 'REPLAY_DIR', 'replay'),
     replayEnabled: get('replay-enabled', 'REPLAY_ENABLED', 'true') === 'true',
-    replayTicksEnabled: get('replay-ticks-enabled', 'REPLAY_TICKS_ENABLED', mode === 'live' ? 'false' : 'true') === 'true',
+    replayTicksEnabled: get('replay-ticks-enabled', 'REPLAY_TICKS_ENABLED', mode === 'dry-run' ? 'true' : 'false') === 'true',
     replayTickMinMs: parseFloat(get('replay-tick-min-ms', 'REPLAY_TICK_MIN_MS', '250')),
     marketRecorderEnabled: get('market-recorder-enabled', 'MARKET_RECORDER_ENABLED', 'true') === 'true',
     marketRecorderDir: get('market-recorder-dir', 'MARKET_RECORDER_DIR', 'market-data'),

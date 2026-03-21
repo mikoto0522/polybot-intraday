@@ -15,7 +15,7 @@ A standalone Polymarket short-term crypto bot for `BTC` and `ETH` `5m/15m` up/do
 - Separate thresholds for `UP` and `DOWN`
 - Delayed paper-fill simulation
 - Per-mode state files: `paper.state.json` and `live.state.json`
-- Replay logging (`jsonl`)
+- Replay logging (`jsonl`) with compact defaults for `paper`/`live`
 - Polyrec-style market data recorder (`csv` per market)
 - Latency and source-health diagnostics
 
@@ -58,6 +58,7 @@ Inside it, each tracked market gets its own CSV file with:
 Optional overrides:
 
 ```bash
+REPLAY_TICKS_ENABLED=false
 MARKET_RECORDER_ENABLED=true
 MARKET_RECORDER_DIR=market-data
 MARKET_RECORDER_MIN_MS=1000
