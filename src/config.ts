@@ -131,12 +131,12 @@ export function loadConfig(): Config {
     binanceLookbackMs: parseFloat(get('binance-lookback-ms', 'BINANCE_LOOKBACK_MS', '5000')),
     trendLookbackMs: parseFloat(get('trend-lookback-ms', 'TREND_LOOKBACK_MS', '900000')),
     trendBiasBps: parseFloat(get('trend-bias-bps', 'TREND_BIAS_BPS', '12')),
-    takeProfitMinPriceDelta: parseFloat(get('take-profit-min-price-delta', 'TAKE_PROFIT_MIN_PRICE_DELTA', '0.03')),
-    takeProfitEdgeFactor: parseFloat(get('take-profit-edge-factor', 'TAKE_PROFIT_EDGE_FACTOR', '0.45')),
-    takeProfitLagFactor: parseFloat(get('take-profit-lag-factor', 'TAKE_PROFIT_LAG_FACTOR', '0.35')),
-    minHoldSec: parseFloat(get('min-hold-sec', 'MIN_HOLD_SEC', '8')),
+    takeProfitMinPriceDelta: parseFloat(get('take-profit-min-price-delta', 'TAKE_PROFIT_MIN_PRICE_DELTA', '0.05')),
+    takeProfitEdgeFactor: parseFloat(get('take-profit-edge-factor', 'TAKE_PROFIT_EDGE_FACTOR', '0.6')),
+    takeProfitLagFactor: parseFloat(get('take-profit-lag-factor', 'TAKE_PROFIT_LAG_FACTOR', '0.45')),
+    minHoldSec: parseFloat(get('min-hold-sec', 'MIN_HOLD_SEC', '10')),
     forceExitSec: parseFloat(get('force-exit-sec', 'FORCE_EXIT_SEC', '18')),
-    forceExitMinRoi: parseFloat(get('force-exit-min-roi', 'FORCE_EXIT_MIN_ROI', '0.01')),
+    forceExitMinRoi: parseFloat(get('force-exit-min-roi', 'FORCE_EXIT_MIN_ROI', '0.03')),
     strategyProfiles: {
       '5m': loadStrategyProfile('5m', getScoped, getSideScoped, {
         closeWindowSec: 60,

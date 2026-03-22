@@ -44,6 +44,10 @@ export class StateStore {
     return this.getOpenPositions().some((pos) => pos.conditionId === conditionId);
   }
 
+  hasAnyPosition(conditionId: string): boolean {
+    return this.state.positions.some((pos) => pos.conditionId === conditionId);
+  }
+
   addPosition(position: OpenPosition): void {
     this.state.positions.push(position);
     this.scheduleSave();

@@ -344,6 +344,7 @@ class LeadLagBot {
 
     for (const market of scope) {
       if (this.state.hasOpenPosition(market.conditionId)) continue;
+      if (this.state.hasAnyPosition(market.conditionId)) continue;
       if (market.baseline == null) continue;
       if (now < market.startTime) continue;
       if (now >= market.endTime) continue;
