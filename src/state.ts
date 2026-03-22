@@ -49,11 +49,13 @@ export class StateStore {
     this.scheduleSave();
   }
 
-  settlePosition(id: string, payout: number, realizedPnl: number): void {
+  closePosition(id: string, payout: number, realizedPnl: number, exitType: 'intraday' | 'settlement', exitPrice?: number): void {
     const pos = this.state.positions.find((item) => item.id === id);
     if (!pos || pos.settledAt) return;
     pos.payout = payout;
     pos.realizedPnl = realizedPnl;
+    pos.closedBy = exitType;
+    pos.exitPrice = exitPrice;
     pos.settledAt = Date.now();
     this.scheduleSave();
   }

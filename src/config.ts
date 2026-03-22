@@ -43,6 +43,7 @@ export interface Config {
   scanSec: number;
   evalMs: number;
   statusSec: number;
+  intradayCheckMs: number;
   settleSec: number;
   settleDelaySec: number;
   baselineCaptureGraceSec: number;
@@ -52,6 +53,12 @@ export interface Config {
   binanceLookbackMs: number;
   trendLookbackMs: number;
   trendBiasBps: number;
+  takeProfitMinPriceDelta: number;
+  takeProfitEdgeFactor: number;
+  takeProfitLagFactor: number;
+  minHoldSec: number;
+  forceExitSec: number;
+  forceExitMinRoi: number;
   strategyProfiles: Record<Duration, StrategyProfile>;
   coins: Coin[];
   durations: Duration[];
@@ -104,7 +111,7 @@ export function loadConfig(): Config {
     funderAddress: get('funder-address', 'POLYMARKET_FUNDER_ADDRESS', ''),
     budget: parseFloat(get('budget', 'BUDGET', '5')),
     paperBalance: parseFloat(get('paper-balance', 'PAPER_BALANCE', '100')),
-    dataDir: get('data-dir', 'DATA_DIR', '.leadlag-state'),
+    dataDir: get('data-dir', 'DATA_DIR', '.intraday-state'),
     replayDir: get('replay-dir', 'REPLAY_DIR', 'replay'),
     replayEnabled: get('replay-enabled', 'REPLAY_ENABLED', 'true') === 'true',
     replayTicksEnabled: get('replay-ticks-enabled', 'REPLAY_TICKS_ENABLED', mode === 'dry-run' ? 'true' : 'false') === 'true',
@@ -114,6 +121,7 @@ export function loadConfig(): Config {
     scanSec: parseFloat(get('scan-sec', 'SCAN_SEC', '20')),
     evalMs: parseFloat(get('eval-ms', 'EVAL_MS', '500')),
     statusSec: parseFloat(get('status-sec', 'STATUS_SEC', '30')),
+    intradayCheckMs: parseFloat(get('intraday-check-ms', 'INTRADAY_CHECK_MS', '1000')),
     settleSec: parseFloat(get('settle-sec', 'SETTLE_SEC', '10')),
     settleDelaySec: parseFloat(get('settle-delay-sec', 'SETTLE_DELAY_SEC', '8')),
     baselineCaptureGraceSec: parseFloat(get('baseline-grace-sec', 'BASELINE_GRACE_SEC', '20')),
@@ -123,6 +131,12 @@ export function loadConfig(): Config {
     binanceLookbackMs: parseFloat(get('binance-lookback-ms', 'BINANCE_LOOKBACK_MS', '5000')),
     trendLookbackMs: parseFloat(get('trend-lookback-ms', 'TREND_LOOKBACK_MS', '900000')),
     trendBiasBps: parseFloat(get('trend-bias-bps', 'TREND_BIAS_BPS', '12')),
+    takeProfitMinPriceDelta: parseFloat(get('take-profit-min-price-delta', 'TAKE_PROFIT_MIN_PRICE_DELTA', '0.03')),
+    takeProfitEdgeFactor: parseFloat(get('take-profit-edge-factor', 'TAKE_PROFIT_EDGE_FACTOR', '0.45')),
+    takeProfitLagFactor: parseFloat(get('take-profit-lag-factor', 'TAKE_PROFIT_LAG_FACTOR', '0.35')),
+    minHoldSec: parseFloat(get('min-hold-sec', 'MIN_HOLD_SEC', '8')),
+    forceExitSec: parseFloat(get('force-exit-sec', 'FORCE_EXIT_SEC', '18')),
+    forceExitMinRoi: parseFloat(get('force-exit-min-roi', 'FORCE_EXIT_MIN_ROI', '0.01')),
     strategyProfiles: {
       '5m': loadStrategyProfile('5m', getScoped, getSideScoped, {
         closeWindowSec: 60,

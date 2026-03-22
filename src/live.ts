@@ -110,6 +110,45 @@ export class LiveTradingClient {
     this.initialized = true;
   }
 
+  async createMarketSell(tokenId: string, shares: number): Promise<LiveOrderResult> {
+    await this.initialize();
+    const client = this.getClient();
+
+    try {
+      const [tickSize, negRisk] = await Promise.all([
+        this.getTickSize(tokenId),
+        this.getNegRisk(tokenId),
+      ]);
+
+      const result = await client.createAndPostMarketOrder(
+        {
+          tokenID: tokenId,
+          side: ClobSide.SELL,
+          amount: shares,
+        },
+        { tickSize, negRisk },
+        OrderType.FOK,
+      );
+
+      const success = result.success === true ||
+        (result.success !== false &&
+          ((result.orderID !== undefined && result.orderID !== '') ||
+            (result.transactionsHashes !== undefined && result.transactionsHashes.length > 0)));
+
+      return {
+        success,
+        errorMsg: success ? undefined : (result.errorMsg || 'market sell rejected'),
+        orderId: result.orderID,
+        transactionHashes: result.transactionsHashes,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        errorMsg: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async createMarketBuy(tokenId: string, amount: number): Promise<LiveOrderResult> {
     await this.initialize();
     const client = this.getClient();

@@ -1,22 +1,23 @@
-# Polybot Lead-Lag
+# Polybot Intraday
 
-A standalone Polymarket short-term crypto bot for `BTC` and `ETH` `5m/15m` up/down markets.
+An independent Polymarket crypto bot variant focused on `intraday take-profit first, settlement fallback`.
+
+## What Is Different
+
+Compared with the base lead-lag version, this build:
+
+- opens positions from the same lead-lag signal engine
+- computes a per-trade `takeProfitPrice`
+- checks open positions every second by default
+- exits intraday if the held side's `bestBid` reaches target
+- can also take a late profit exit close to expiry
+- only holds to settlement if no intraday exit is available
 
 ## Modes
 
 - `dry-run`: signal logging only
-- `paper`: simulated fills, positions, and settlement
-- `live`: real CLOB order submission for the international Polymarket platform
-
-## Features
-
-- Binance lead / Chainlink anchor signal model
-- Separate strategy profiles for `5m` and `15m`
-- Separate thresholds for `UP` and `DOWN`
-- Delayed paper-fill simulation
-- Per-mode state files: `paper.state.json` and `live.state.json`
-- Replay logging (`jsonl`) with compact defaults for `paper`/`live`
-- Latency and source-health diagnostics
+- `paper`: simulated entry, intraday exit, and settlement fallback
+- `live`: real market buy / market sell on the international CLOB
 
 ## Commands
 
@@ -28,29 +29,40 @@ npm run paper -- --budget=5 --paper-balance=100
 npm run live -- --budget=1 --coins=BTC,ETH --durations=5m
 ```
 
-## Data Outputs
+## State Directory
 
-State and logs are stored under `.leadlag-state/` by default:
+This version uses its own state directory by default:
 
-- `paper.state.json`
-- `live.state.json`
-- `replay/` for event replay logs
+```text
+.intraday-state/
+```
 
-## Recorder Config
+That keeps it separate from the original lead-lag bot.
+
+## Intraday Exit Config
 
 Optional overrides:
 
 ```bash
-REPLAY_TICKS_ENABLED=false
+INTRADAY_CHECK_MS=1000
+TAKE_PROFIT_MIN_PRICE_DELTA=0.03
+TAKE_PROFIT_EDGE_FACTOR=0.45
+TAKE_PROFIT_LAG_FACTOR=0.35
+MIN_HOLD_SEC=8
+FORCE_EXIT_SEC=18
+FORCE_EXIT_MIN_ROI=0.01
 ```
 
-Or via CLI:
+These control:
 
-```bash
-```
+- how often open positions are checked
+- the default take-profit target above entry
+- how much `edge` and `lag` influence the target
+- minimum hold time before intraday exit is allowed
+- late-profit exit behavior close to expiry
 
 ## Notes
 
-- `live` currently targets the international CLOB API, not Polymarket US.
-- Region restrictions still apply in `live` mode.
-- For Safe/funder accounts, keep `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER_ADDRESS` aligned with the account that actually holds balance.
+- `paper` and `live` still share the same signal engine as the base strategy.
+- `live` still targets the international CLOB and remains subject to region restrictions.
+- For Safe/funder accounts, keep `POLYMARKET_SIGNATURE_TYPE` and `POLYMARKET_FUNDER_ADDRESS` aligned with the account that holds balance.

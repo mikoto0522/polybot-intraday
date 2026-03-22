@@ -70,6 +70,8 @@ export interface TrackedMarket {
   baselineCapturedAt?: number;
 }
 
+export type ExitType = 'intraday' | 'settlement';
+
 export interface OpenPosition {
   id: string;
   conditionId: string;
@@ -88,6 +90,14 @@ export interface OpenPosition {
   openedAt: number;
   endTime: number;
   mode: BotMode;
+  takeProfitPrice?: number;
+  exitFloorPrice?: number;
+  minHoldUntil?: number;
+  entryEdge?: number;
+  entryLag?: number;
+  entryImpliedProb?: number;
+  closedBy?: ExitType;
+  exitPrice?: number;
   settledAt?: number;
   payout?: number;
   realizedPnl?: number;

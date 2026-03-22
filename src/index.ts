@@ -56,6 +56,7 @@ class LeadLagBot {
   private readonly recentRejects = new Map<string, number>();
   private readonly missingBinanceByCoin = new Map<Coin, number>();
   private readonly redeemRetryAfter = new Map<string, number>();
+  private readonly exitRetryAfter = new Map<string, number>();
   private readonly tokenToCondition = new Map<string, string>();
   private readonly coinToConditions = new Map<Coin, Set<string>>();
   private readonly dirtyConditions = new Set<string>();
@@ -115,6 +116,13 @@ class LeadLagBot {
       maxOpenPositions: this.config.maxOpenPositions,
       maxOpenPositionsPerCoin: this.config.maxOpenPositionsPerCoin,
       replayTicksEnabled: this.config.replayTicksEnabled,
+      intradayCheckMs: this.config.intradayCheckMs,
+      takeProfitMinPriceDelta: this.config.takeProfitMinPriceDelta,
+      takeProfitEdgeFactor: this.config.takeProfitEdgeFactor,
+      takeProfitLagFactor: this.config.takeProfitLagFactor,
+      minHoldSec: this.config.minHoldSec,
+      forceExitSec: this.config.forceExitSec,
+      forceExitMinRoi: this.config.forceExitMinRoi,
     });
 
     this.realtime.on('orderbook', (book: OrderbookSnapshot) => this.handleOrderbook(book));
@@ -125,6 +133,7 @@ class LeadLagBot {
     await this.discoverMarkets();
     this.captureBaselines();
     this.evaluateMarkets();
+    await this.manageOpenPositions();
     await this.settlePositions();
 
     setInterval(() => void this.discoverMarkets(), this.config.scanSec * 1000);
@@ -132,6 +141,7 @@ class LeadLagBot {
       this.captureBaselines();
       this.evaluateMarkets();
     }, this.config.evalMs);
+    setInterval(() => void this.manageOpenPositions(), this.config.intradayCheckMs);
     setInterval(() => void this.settlePositions(), this.config.settleSec * 1000);
     setInterval(() => void this.printStatus(), this.config.statusSec * 1000);
 
@@ -688,9 +698,94 @@ class LeadLagBot {
       openedAt: Date.now(),
       endTime: market.endTime,
       mode: this.config.mode,
+      takeProfitPrice: this.computeTakeProfitPrice(fillAsk, signal),
+      exitFloorPrice: fillAsk * (1 + this.config.forceExitMinRoi),
+      minHoldUntil: Date.now() + this.config.minHoldSec * 1000,
+      entryEdge: signal.edge,
+      entryLag: signal.marketLag,
+      entryImpliedProb: signal.impliedProb,
     };
 
     this.state.addPosition(position);
+  }
+
+  private computeTakeProfitPrice(entryPrice: number, signal: SignalCandidate): number {
+    const delta = Math.max(
+      this.config.takeProfitMinPriceDelta,
+      signal.edge * this.config.takeProfitEdgeFactor,
+      signal.marketLag * this.config.takeProfitLagFactor,
+    );
+    return clamp(entryPrice + delta, Math.min(0.99, entryPrice + 0.01), 0.97);
+  }
+
+  private async manageOpenPositions(): Promise<void> {
+    const now = Date.now();
+    for (const position of this.state.getOpenPositions()) {
+      if (now >= position.endTime) continue;
+      if ((position.minHoldUntil || 0) > now) continue;
+      const retryAfter = this.exitRetryAfter.get(position.id) || 0;
+      if (retryAfter > now) continue;
+
+      const strategy = this.getStrategyProfile(position.duration, position.coin);
+      const book = this.orderbooks.get(position.tokenId);
+      if (!book || now - book.timestamp > strategy.maxBookAgeMs) continue;
+      const bestBid = book.bestBid;
+      if (bestBid <= 0) continue;
+
+      const timeRemainingSec = (position.endTime - now) / 1000;
+      const hitTakeProfit = position.takeProfitPrice != null && bestBid >= position.takeProfitPrice;
+      const lateProfitExit = timeRemainingSec <= this.config.forceExitSec && position.exitFloorPrice != null && bestBid >= position.exitFloorPrice;
+      if (!hitTakeProfit && !lateProfitExit) continue;
+
+      const reason = hitTakeProfit ? 'take_profit' : 'late_profit_exit';
+      const success = await this.closeOpenPosition(position, bestBid, reason);
+      if (!success) {
+        this.exitRetryAfter.set(position.id, Date.now() + 5000);
+      } else {
+        this.exitRetryAfter.delete(position.id);
+      }
+    }
+  }
+
+  private async closeOpenPosition(position: OpenPosition, exitPrice: number, reason: string): Promise<boolean> {
+    const estimatedPayout = position.shares * exitPrice;
+    const realizedPnl = estimatedPayout - position.stake;
+
+    if (this.config.mode === 'live') {
+      const result = await this.live!.createMarketSell(position.tokenId, position.shares);
+      if (!result.success) {
+        this.log.warn(`[EXIT FAIL] ${position.slug} ${position.side} ${result.errorMsg || 'market sell rejected'}`);
+        this.replay.record('exit_failed', {
+          mode: this.config.mode,
+          conditionId: position.conditionId,
+          slug: position.slug,
+          side: position.side,
+          reason,
+          error: result.errorMsg || 'market sell rejected',
+          exitPrice,
+          shares: position.shares,
+        });
+        return false;
+      }
+    } else {
+      this.state.setPaperBalance(this.state.getPaperBalance() + estimatedPayout);
+    }
+
+    this.state.closePosition(position.id, estimatedPayout, realizedPnl, 'intraday', exitPrice);
+    this.log.trade(`[EXIT] ${position.slug} ${position.side} reason=${reason} exit=$${exitPrice.toFixed(3)} pnl=$${realizedPnl.toFixed(2)}`);
+    this.replay.record(this.config.mode === 'live' ? 'exit_live' : 'exit_paper', {
+      conditionId: position.conditionId,
+      slug: position.slug,
+      side: position.side,
+      reason,
+      exitPrice,
+      payout: estimatedPayout,
+      realizedPnl,
+      shares: position.shares,
+      stake: position.stake,
+      paperBalance: this.state.getPaperBalance(),
+    });
+    return true;
   }
 
   private async settlePositions(): Promise<void> {
@@ -734,7 +829,7 @@ class LeadLagBot {
 
       this.redeemRetryAfter.delete(position.id);
       const realizedPnl = payout - position.stake;
-      this.state.settlePosition(position.id, payout, realizedPnl);
+      this.state.closePosition(position.id, payout, realizedPnl, 'settlement');
       this.log.trade(
         `[SETTLED] ${position.slug} ${position.side} payout=$${payout.toFixed(2)} pnl=$${realizedPnl.toFixed(2)}`,
       );
@@ -795,6 +890,8 @@ class LeadLagBot {
     const state = this.state.getState();
     const openPositions = state.positions.filter((position) => !position.settledAt);
     const settled = state.positions.filter((position) => position.settledAt);
+    const intradayExited = settled.filter((position) => position.closedBy === 'intraday');
+    const settlementExited = settled.filter((position) => position.closedBy === 'settlement');
     const realized = settled.reduce((sum, position) => sum + (position.realizedPnl || 0), 0);
     const topRejects = [...this.rejectCounts.entries()]
       .sort((a, b) => b[1] - a[1])
@@ -812,7 +909,7 @@ class LeadLagBot {
 
     const statusText = this.config.mode === 'live'
       ? `Mode=${this.config.mode} | Markets=${this.markets.size} | ${balanceText} | Rejects=${topRejects || 'none'}`
-      : `Mode=${this.config.mode} | Markets=${this.markets.size} | Open=${openPositions.length} | Settled=${settled.length} | ${balanceText} | Realized=$${realized.toFixed(2)} | Rejects=${topRejects || 'none'}`;
+      : `Mode=${this.config.mode} | Markets=${this.markets.size} | Open=${openPositions.length} | IntradayExit=${intradayExited.length} | SettleExit=${settlementExited.length} | ${balanceText} | Realized=$${realized.toFixed(2)} | Rejects=${topRejects || 'none'}`;
 
     this.log.status(statusText);
 
@@ -890,6 +987,8 @@ class LeadLagBot {
     const state = this.state.getState();
     const openPositions = state.positions.filter((position) => !position.settledAt);
     const settled = state.positions.filter((position) => position.settledAt);
+    const intradayExited = settled.filter((position) => position.closedBy === 'intraday');
+    const settlementExited = settled.filter((position) => position.closedBy === 'settlement');
     const realized = settled.reduce((sum, position) => sum + (position.realizedPnl || 0), 0);
     this.replay.record('run_end', {
       openPositions: openPositions.length,
