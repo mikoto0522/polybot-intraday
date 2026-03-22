@@ -440,11 +440,12 @@ class LeadLagBot {
     const chainlinkDeltaBps = chainAvailable && chain ? toBps(chain.price, baseline) : 0;
     const binanceDeltaBps = toBps(spot.price, baseline);
     const binancePulseBps = this.getBinancePulseBps(market.coin);
-    const direction = chooseDirection(binanceDeltaBps, chainlinkDeltaBps, strategy);
+    const macroTrendBps = this.getBinanceTrendBps(market.coin);
+    const direction = chooseDirection(binanceDeltaBps, chainlinkDeltaBps, strategy, macroTrendBps, this.config.trendBiasBps);
     if (!direction) {
-      return fail('direction_rejected', { binanceDeltaBps, chainlinkDeltaBps });
+      return fail('direction_rejected', { binanceDeltaBps, chainlinkDeltaBps, macroTrendBps });
     }
-    const sideStrategy = strategy.sides[direction];
+    const sideStrategy = applyTrendToSideStrategy(strategy.sides[direction], direction, macroTrendBps, this.config.trendBiasBps);
     if (Math.abs(binancePulseBps) < sideStrategy.minBinancePulseBps) {
       return fail('binance_pulse_too_small', { binancePulseBps, side: direction });
     }
@@ -552,6 +553,7 @@ class LeadLagBot {
       leadGapBps: signal.leadGapBps,
       marketToDecisionMs,
       baseline,
+      macroTrendBps,
       timeRemainingSec,
     });
 
@@ -770,6 +772,25 @@ class LeadLagBot {
     if (!history || history.length === 0 || !latest) return 0;
 
     const targetTs = latest.timestamp - this.config.binanceLookbackMs;
+    let reference = history[0];
+    for (const tick of history) {
+      if (tick.timestamp <= targetTs) {
+        reference = tick;
+      } else {
+        break;
+      }
+    }
+
+    if (reference.price <= 0) return 0;
+    return ((latest.price - reference.price) / reference.price) * 10_000;
+  }
+
+  private getBinanceTrendBps(coin: Coin): number {
+    const history = this.binanceHistory.get(coin);
+    const latest = this.binance.get(coin);
+    if (!history || history.length === 0 || !latest) return 0;
+
+    const targetTs = latest.timestamp - this.config.trendLookbackMs;
     let reference = history[0];
     for (const tick of history) {
       if (tick.timestamp <= targetTs) {
@@ -1079,7 +1100,38 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
   };
 }
 
-function chooseDirection(binanceDeltaBps: number, chainlinkDeltaBps: number, strategy: StrategyProfile): Side | null {
+function applyTrendToSideStrategy(sideStrategy: StrategyProfile['sides'][Side], side: Side, macroTrendBps: number, trendBiasBps: number): StrategyProfile['sides'][Side] {
+  const adjusted = { ...sideStrategy };
+  if (macroTrendBps <= -trendBiasBps) {
+    if (side === 'UP') {
+      adjusted.binanceTriggerBps += 0.35;
+      adjusted.minBinancePulseBps += 0.12;
+      adjusted.minLeadGapBps += 0.08;
+      adjusted.minEdge += 0.004;
+      adjusted.minMarketLag += 0.002;
+      adjusted.maxAsk = Math.max(0.5, adjusted.maxAsk - 0.04);
+    } else {
+      adjusted.binanceTriggerBps = Math.max(0.6, adjusted.binanceTriggerBps - 0.12);
+      adjusted.minBinancePulseBps = Math.max(0.15, adjusted.minBinancePulseBps - 0.05);
+      adjusted.minLeadGapBps = Math.max(0.08, adjusted.minLeadGapBps - 0.04);
+      adjusted.minEdge = Math.max(0.006, adjusted.minEdge - 0.002);
+      adjusted.minMarketLag = Math.max(0.002, adjusted.minMarketLag - 0.001);
+      adjusted.maxAsk = Math.min(0.95, adjusted.maxAsk + 0.02);
+    }
+  } else if (macroTrendBps >= trendBiasBps) {
+    if (side === 'DOWN') {
+      adjusted.binanceTriggerBps += 0.2;
+      adjusted.minBinancePulseBps += 0.08;
+      adjusted.minLeadGapBps += 0.06;
+      adjusted.minEdge += 0.002;
+      adjusted.minMarketLag += 0.001;
+      adjusted.maxAsk = Math.max(0.5, adjusted.maxAsk - 0.02);
+    }
+  }
+  return adjusted;
+}
+
+function chooseDirection(binanceDeltaBps: number, chainlinkDeltaBps: number, strategy: StrategyProfile, macroTrendBps: number, trendBiasBps: number): Side | null {
   let direction: Side | null = null;
   if (binanceDeltaBps >= strategy.sides.UP.binanceTriggerBps) direction = 'UP';
   else if (binanceDeltaBps <= -strategy.sides.DOWN.binanceTriggerBps) direction = 'DOWN';

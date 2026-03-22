@@ -53,6 +53,8 @@ export interface Config {
   maxOpenPositionsPerCoin: number;
   coinCooldownSec: number;
   binanceLookbackMs: number;
+  trendLookbackMs: number;
+  trendBiasBps: number;
   strategyProfiles: Record<Duration, StrategyProfile>;
   coins: Coin[];
   durations: Duration[];
@@ -125,6 +127,8 @@ export function loadConfig(): Config {
     maxOpenPositionsPerCoin: parseFloat(get('max-open-positions-per-coin', 'MAX_OPEN_POSITIONS_PER_COIN', '6')),
     coinCooldownSec: parseFloat(get('coin-cooldown-sec', 'COIN_COOLDOWN_SEC', '3')),
     binanceLookbackMs: parseFloat(get('binance-lookback-ms', 'BINANCE_LOOKBACK_MS', '5000')),
+    trendLookbackMs: parseFloat(get('trend-lookback-ms', 'TREND_LOOKBACK_MS', '900000')),
+    trendBiasBps: parseFloat(get('trend-bias-bps', 'TREND_BIAS_BPS', '12')),
     strategyProfiles: {
       '5m': loadStrategyProfile('5m', getScoped, getSideScoped, {
         closeWindowSec: 60,
