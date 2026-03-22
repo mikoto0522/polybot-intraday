@@ -60,7 +60,11 @@ class LeadLagBot {
   private readonly tokenToCondition = new Map<string, string>();
   private readonly coinToConditions = new Map<Coin, Set<string>>();
   private readonly dirtyConditions = new Set<string>();
+  private readonly dirtyPositionIds = new Set<string>();
   private evaluateScheduled = false;
+  private positionCheckScheduled = false;
+  private positionCheckRunning = false;
+  private positionCheckQueued = false;
 
   constructor(config: Config) {
     this.config = config;
@@ -141,7 +145,7 @@ class LeadLagBot {
       this.captureBaselines();
       this.evaluateMarkets();
     }, this.config.evalMs);
-    setInterval(() => void this.manageOpenPositions(), this.config.intradayCheckMs);
+    setInterval(() => this.scheduleOpenPositionEvaluation(), this.config.intradayCheckMs);
     setInterval(() => void this.settlePositions(), this.config.settleSec * 1000);
     setInterval(() => void this.printStatus(), this.config.statusSec * 1000);
 
@@ -282,6 +286,10 @@ class LeadLagBot {
     const conditionId = this.tokenToCondition.get(book.assetId);
     if (conditionId) {
       this.markConditionDirty(conditionId);
+    }
+    const openPositionIds = this.findOpenPositionIdsByToken(book.assetId);
+    if (openPositionIds.length > 0) {
+      this.scheduleOpenPositionEvaluation(openPositionIds);
     }
   }
 
@@ -718,9 +726,13 @@ class LeadLagBot {
     return clamp(entryPrice + delta, Math.min(0.99, entryPrice + 0.01), 0.97);
   }
 
-  private async manageOpenPositions(): Promise<void> {
+  private async manageOpenPositions(positionIds?: Iterable<string>): Promise<void> {
     const now = Date.now();
-    for (const position of this.state.getOpenPositions()) {
+    const scopedIds = positionIds ? new Set(positionIds) : null;
+    const positions = scopedIds
+      ? this.state.getOpenPositions().filter((position) => scopedIds.has(position.id))
+      : this.state.getOpenPositions();
+    for (const position of positions) {
       if (now >= position.endTime) continue;
       if ((position.minHoldUntil || 0) > now) continue;
       const retryAfter = this.exitRetryAfter.get(position.id) || 0;
@@ -924,7 +936,8 @@ class LeadLagBot {
       for (const position of openPositions.slice(-5)) {
         this.log.info(
           `[OPEN] ${position.side} ${position.slug} stake=$${position.stake.toFixed(2)} ` +
-          `entry=${position.entryPrice.toFixed(3)} shares=${position.shares.toFixed(2)}`,
+          `entry=${position.entryPrice.toFixed(3)} tp=${(position.takeProfitPrice ?? 0).toFixed(3)} ` +
+          `floor=${(position.exitFloorPrice ?? 0).toFixed(3)} shares=${position.shares.toFixed(2)}`,
         );
       }
     }
@@ -980,6 +993,44 @@ class LeadLagBot {
       this.captureBaselines();
       this.evaluateMarkets(dirty);
     });
+  }
+
+  private findOpenPositionIdsByToken(tokenId: string): string[] {
+    return this.state.getOpenPositions()
+      .filter((position) => position.tokenId === tokenId)
+      .map((position) => position.id);
+  }
+
+  private scheduleOpenPositionEvaluation(positionIds?: Iterable<string>): void {
+    if (positionIds) {
+      for (const positionId of positionIds) {
+        this.dirtyPositionIds.add(positionId);
+      }
+    }
+    if (this.positionCheckScheduled) return;
+    this.positionCheckScheduled = true;
+    setImmediate(() => void this.flushOpenPositionEvaluation());
+  }
+
+  private async flushOpenPositionEvaluation(): Promise<void> {
+    this.positionCheckScheduled = false;
+    if (this.positionCheckRunning) {
+      this.positionCheckQueued = true;
+      return;
+    }
+
+    this.positionCheckRunning = true;
+    try {
+      const scopedIds = this.dirtyPositionIds.size > 0 ? [...this.dirtyPositionIds] : undefined;
+      this.dirtyPositionIds.clear();
+      await this.manageOpenPositions(scopedIds);
+    } finally {
+      this.positionCheckRunning = false;
+      if (this.positionCheckQueued || this.dirtyPositionIds.size > 0) {
+        this.positionCheckQueued = false;
+        this.scheduleOpenPositionEvaluation();
+      }
+    }
   }
 
   private async shutdown(): Promise<void> {
