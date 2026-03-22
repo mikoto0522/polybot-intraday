@@ -163,8 +163,9 @@ class LeadLagBot {
     this.realtime.subscribeCryptoChainlinkPrices(chainlinkSymbols);
   }
 
-  private getStrategyProfile(duration: Duration): StrategyProfile {
-    return this.config.strategyProfiles[duration];
+  private getStrategyProfile(duration: Duration, coin?: Coin): StrategyProfile {
+    const base = this.config.strategyProfiles[duration];
+    return coin ? applyCoinStrategyAdjustments(base, coin, duration) : base;
   }
 
   private handleBinancePrice(price: CryptoPrice): void {
@@ -343,7 +344,7 @@ class LeadLagBot {
       if (now >= market.endTime) continue;
       if ((this.coinCooldownUntil.get(market.coin) || 0) > now) continue;
 
-      const strategy = this.getStrategyProfile(market.duration);
+      const strategy = this.getStrategyProfile(market.duration, market.coin);
       const timeRemainingSec = (market.endTime - now) / 1000;
       if (timeRemainingSec > strategy.closeWindowSec || timeRemainingSec <= 1) continue;
 
@@ -421,7 +422,7 @@ class LeadLagBot {
       return null;
     };
 
-    const strategy = this.getStrategyProfile(market.duration);
+    const strategy = this.getStrategyProfile(market.duration, market.coin);
 
     const baseline = market.baseline;
     if (baseline == null) return fail('missing_baseline');
@@ -933,9 +934,10 @@ class LeadLagBot {
       const marketMid = preferredSide === 'UP'
         ? clamp((preferredAsk + (1 - down.bestBid)) / 2, 0, 1)
         : clamp((preferredAsk + (1 - up.bestBid)) / 2, 0, 1);
-      const impliedProb = clamp(0.5 + (Math.abs(binanceDeltaBps) / this.getStrategyProfile(market.duration).fairScaleBps) * 0.47, 0.5, 0.97);
+      const recorderStrategy = this.getStrategyProfile(market.duration, market.coin);
+      const impliedProb = clamp(0.5 + (Math.abs(binanceDeltaBps) / recorderStrategy.fairScaleBps) * 0.47, 0.5, 0.97);
       const preferredLag = preferredAsk > 0 ? impliedProb - marketMid : 0;
-      const preferredEdge = preferredAsk > 0 ? impliedProb - preferredAsk - this.getStrategyProfile(market.duration).executionBuffer : 0;
+      const preferredEdge = preferredAsk > 0 ? impliedProb - preferredAsk - recorderStrategy.executionBuffer : 0;
 
       this.marketRecorder.record({
         conditionId: market.conditionId,
@@ -1044,6 +1046,37 @@ function parseShortTermSlug(slug: string): { coin: Coin; duration: Duration; sta
   const startTime = parseInt(match[3], 10) * 1000;
   const endTime = startTime + (duration === '5m' ? 5 * 60_000 : 15 * 60_000);
   return { coin, duration, startTime, endTime };
+}
+
+function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, duration: Duration): StrategyProfile {
+  const up = { ...strategy.sides.UP };
+  const down = { ...strategy.sides.DOWN };
+
+  if (coin === 'BTC') {
+    up.binanceTriggerBps += duration === '5m' ? 0.1 : 0.15;
+    up.minBinancePulseBps += duration === '5m' ? 0.05 : 0.08;
+    up.minLeadGapBps += duration === '5m' ? 0.03 : 0.05;
+    up.minEdge += duration === '5m' ? 0.001 : 0.002;
+    up.minMarketLag += duration === '5m' ? 0.0005 : 0.001;
+    up.maxAsk = Math.max(0.55, up.maxAsk - 0.01);
+  }
+
+  if (coin === 'ETH') {
+    up.binanceTriggerBps += duration === '5m' ? 0.4 : 0.45;
+    up.minBinancePulseBps += duration === '5m' ? 0.15 : 0.2;
+    up.minLeadGapBps += duration === '5m' ? 0.1 : 0.12;
+    up.minEdge += duration === '5m' ? 0.004 : 0.005;
+    up.minMarketLag += duration === '5m' ? 0.0025 : 0.003;
+    up.maxAsk = Math.max(0.5, up.maxAsk - 0.05);
+  }
+
+  return {
+    ...strategy,
+    sides: {
+      UP: up,
+      DOWN: down,
+    },
+  };
 }
 
 function chooseDirection(binanceDeltaBps: number, chainlinkDeltaBps: number, strategy: StrategyProfile): Side | null {
