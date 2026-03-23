@@ -58,6 +58,7 @@ export interface Config {
   takeProfitLagFactor: number;
   minHoldSec: number;
   forceExitSec: number;
+  hardExitSec: number;
   forceExitMinRoi: number;
   strategyProfiles: Record<Duration, StrategyProfile>;
   coins: Coin[];
@@ -136,6 +137,7 @@ export function loadConfig(): Config {
     takeProfitLagFactor: parseFloat(get('take-profit-lag-factor', 'TAKE_PROFIT_LAG_FACTOR', '0.3')),
     minHoldSec: parseFloat(get('min-hold-sec', 'MIN_HOLD_SEC', '7')),
     forceExitSec: parseFloat(get('force-exit-sec', 'FORCE_EXIT_SEC', '30')),
+    hardExitSec: parseFloat(get('hard-exit-sec', 'HARD_EXIT_SEC', '12')),
     forceExitMinRoi: parseFloat(get('force-exit-min-roi', 'FORCE_EXIT_MIN_ROI', '0.005')),
     strategyProfiles: {
       '5m': loadStrategyProfile('5m', getScoped, getSideScoped, {

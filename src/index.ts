@@ -126,6 +126,7 @@ class LeadLagBot {
       takeProfitLagFactor: this.config.takeProfitLagFactor,
       minHoldSec: this.config.minHoldSec,
       forceExitSec: this.config.forceExitSec,
+      hardExitSec: this.config.hardExitSec,
       forceExitMinRoi: this.config.forceExitMinRoi,
     });
 
@@ -505,6 +506,17 @@ class LeadLagBot {
     if (leadGapBps < sideStrategy.minLeadGapBps) {
       return fail('lead_gap_too_small', { leadGapBps, binanceDeltaBps, chainlinkDeltaBps, side: direction });
     }
+    const coinSideRejectReason = getCoinSideRejectReason(
+      market.coin,
+      market.duration,
+      direction,
+      binancePulseBps,
+      chainlinkDeltaBps,
+      macroTrendBps,
+    );
+    if (coinSideRejectReason) {
+      return fail(coinSideRejectReason, { side: direction, binancePulseBps, chainlinkDeltaBps, macroTrendBps });
+    }
 
     const upBook = this.orderbooks.get(market.upTokenId);
     const downBook = this.orderbooks.get(market.downTokenId);
@@ -753,7 +765,7 @@ class LeadLagBot {
       openedAt: Date.now(),
       endTime: market.endTime,
       mode: this.config.mode,
-      takeProfitPrice: this.computeTakeProfitPrice(fillAsk, signal),
+      takeProfitPrice: this.computeTakeProfitPrice(market, fillAsk, signal),
       exitFloorPrice: fillAsk * (1 + this.config.forceExitMinRoi),
       minHoldUntil: Date.now() + this.config.minHoldSec * 1000,
       entryEdge: signal.edge,
@@ -764,12 +776,15 @@ class LeadLagBot {
     this.state.addPosition(position);
   }
 
-  private computeTakeProfitPrice(entryPrice: number, signal: SignalCandidate): number {
-    const delta = Math.max(
+  private computeTakeProfitPrice(market: TrackedMarket, entryPrice: number, signal: SignalCandidate): number {
+    let delta = Math.max(
       this.config.takeProfitMinPriceDelta,
       signal.edge * this.config.takeProfitEdgeFactor,
       signal.marketLag * this.config.takeProfitLagFactor,
     );
+    if (market.coin === 'ETH' && market.duration === '5m' && signal.side === 'UP') {
+      delta = Math.min(0.09, Math.max(this.config.takeProfitMinPriceDelta, delta * 0.55));
+    }
     return clamp(entryPrice + delta, Math.min(0.99, entryPrice + 0.01), 0.97);
   }
 
@@ -808,7 +823,8 @@ class LeadLagBot {
       const timeRemainingSec = (position.endTime - now) / 1000;
       const hitTakeProfit = position.takeProfitPrice != null && bestBid >= position.takeProfitPrice;
       const lateExitPrice = this.computeLateExitPrice(position, timeRemainingSec);
-      const lateExit = lateExitPrice != null && bestBid >= lateExitPrice;
+      const hardExit = timeRemainingSec <= this.config.hardExitSec;
+      const lateExit = hardExit || (lateExitPrice != null && bestBid >= lateExitPrice);
       this.replay.record('position_check', {
         id: position.id,
         conditionId: position.conditionId,
@@ -822,6 +838,7 @@ class LeadLagBot {
         lateExitPrice,
         hitTakeProfit,
         lateExit,
+        hardExit,
         timeRemainingSec,
         entryEdge: position.entryEdge ?? null,
         entryLag: position.entryLag ?? null,
@@ -830,9 +847,13 @@ class LeadLagBot {
 
       const reason = hitTakeProfit
         ? 'take_profit'
-        : lateExitPrice != null && lateExitPrice >= position.entryPrice
-          ? 'late_profit_exit'
-          : 'late_defensive_exit';
+        : hardExit
+          ? bestBid >= position.entryPrice
+            ? 'expiry_profit_exit'
+            : 'expiry_defensive_exit'
+          : lateExitPrice != null && lateExitPrice >= position.entryPrice
+            ? 'late_profit_exit'
+            : 'late_defensive_exit';
       const success = await this.closeOpenPosition(position, bestBid, reason);
       if (!success) {
         this.exitRetryAfter.set(position.id, Date.now() + 5000);
@@ -1248,12 +1269,12 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
   }
 
   if (coin === 'ETH') {
-    up.binanceTriggerBps += duration === '5m' ? 0.45 : 0.45;
-    up.minBinancePulseBps += duration === '5m' ? 0.16 : 0.2;
-    up.minLeadGapBps += duration === '5m' ? 0.1 : 0.12;
-    up.minEdge += duration === '5m' ? 0.005 : 0.005;
-    up.minMarketLag += duration === '5m' ? 0.002 : 0.003;
-    up.maxAsk = Math.max(0.5, up.maxAsk - (duration === '5m' ? 0.1 : 0.05));
+    up.binanceTriggerBps += duration === '5m' ? 0.55 : 0.5;
+    up.minBinancePulseBps += duration === '5m' ? 0.22 : 0.24;
+    up.minLeadGapBps += duration === '5m' ? 0.14 : 0.14;
+    up.minEdge += duration === '5m' ? 0.012 : 0.008;
+    up.minMarketLag += duration === '5m' ? 0.006 : 0.004;
+    up.maxAsk = Math.max(0.48, up.maxAsk - (duration === '5m' ? 0.12 : 0.06));
   }
 
   return {
@@ -1294,6 +1315,24 @@ function applyTrendToSideStrategy(sideStrategy: StrategyProfile['sides'][Side], 
     }
   }
   return adjusted;
+}
+
+function getCoinSideRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  binancePulseBps: number,
+  chainlinkDeltaBps: number,
+  macroTrendBps: number,
+): string | null {
+  if (coin === 'ETH' && duration === '5m' && side === 'UP') {
+    if (binancePulseBps <= 0) return 'eth_up_pulse_negative';
+    if (chainlinkDeltaBps < 0 && macroTrendBps < 18) return 'eth_up_needs_trend_confirmation';
+    if (macroTrendBps <= -12 && (chainlinkDeltaBps < 3 || binancePulseBps < 2.2)) {
+      return 'eth_up_countertrend_too_weak';
+    }
+  }
+  return null;
 }
 
 function chooseDirection(

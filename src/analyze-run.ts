@@ -273,6 +273,9 @@ function passesCurrentConfig(signal: SignalPayload, baseStrategy: StrategyProfil
     trendBiasBps,
   );
   if (chosenSide !== signal.side) return false;
+  if (getCoinSideRejectReason(signal.coin, signal.duration, signal.side, signal.binancePulseBps, signal.chainlinkDeltaBps, signal.macroTrendBps)) {
+    return false;
+  }
   const sideStrategy = applyTrendToSideStrategy(strategy.sides[signal.side], signal.side, signal.macroTrendBps, trendBiasBps);
 
   const binanceSign = signal.side === 'UP' ? 1 : -1;
@@ -290,6 +293,24 @@ function passesCurrentConfig(signal: SignalPayload, baseStrategy: StrategyProfil
   return true;
 }
 
+function getCoinSideRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  binancePulseBps: number,
+  chainlinkDeltaBps: number,
+  macroTrendBps: number,
+): string | null {
+  if (coin === 'ETH' && duration === '5m' && side === 'UP') {
+    if (binancePulseBps <= 0) return 'eth_up_pulse_negative';
+    if (chainlinkDeltaBps < 0 && macroTrendBps < 18) return 'eth_up_needs_trend_confirmation';
+    if (macroTrendBps <= -12 && (chainlinkDeltaBps < 3 || binancePulseBps < 2.2)) {
+      return 'eth_up_countertrend_too_weak';
+    }
+  }
+  return null;
+}
+
 function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, duration: Duration): StrategyProfile {
   const up = { ...strategy.sides.UP };
   const down = { ...strategy.sides.DOWN };
@@ -304,12 +325,12 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
   }
 
   if (coin === 'ETH') {
-    up.binanceTriggerBps += duration === '5m' ? 0.45 : 0.45;
-    up.minBinancePulseBps += duration === '5m' ? 0.16 : 0.2;
-    up.minLeadGapBps += duration === '5m' ? 0.1 : 0.12;
-    up.minEdge += duration === '5m' ? 0.005 : 0.005;
-    up.minMarketLag += duration === '5m' ? 0.002 : 0.003;
-    up.maxAsk = Math.max(0.5, up.maxAsk - (duration === '5m' ? 0.1 : 0.05));
+    up.binanceTriggerBps += duration === '5m' ? 0.55 : 0.5;
+    up.minBinancePulseBps += duration === '5m' ? 0.22 : 0.24;
+    up.minLeadGapBps += duration === '5m' ? 0.14 : 0.14;
+    up.minEdge += duration === '5m' ? 0.012 : 0.008;
+    up.minMarketLag += duration === '5m' ? 0.006 : 0.004;
+    up.maxAsk = Math.max(0.48, up.maxAsk - (duration === '5m' ? 0.12 : 0.06));
   }
 
   return {
