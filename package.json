@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "live": "tsx src/index.ts --live",
     "paper": "tsx src/index.ts --paper",
-    "dry-run": "tsx src/index.ts --dry-run"
+    "dry-run": "tsx src/index.ts --dry-run",
+    "analyze-run": "tsx src/analyze-run.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.0",

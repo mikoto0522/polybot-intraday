@@ -187,7 +187,12 @@ class LeadLagBot {
 
     const history = this.binanceHistory.get(coin) || [];
     history.push(tick);
-    const cutoff = Date.now() - Math.max(this.config.binanceLookbackMs * 3, 15_000);
+    const retentionMs = Math.max(
+      this.config.binanceLookbackMs * 3,
+      this.config.trendLookbackMs + this.config.binanceLookbackMs,
+      15_000,
+    );
+    const cutoff = Date.now() - retentionMs;
     while (history.length > 0 && history[0].timestamp < cutoff) {
       history.shift();
     }
@@ -416,7 +421,7 @@ class LeadLagBot {
       if (reason === 'missing_binance') {
         this.missingBinanceByCoin.set(market.coin, (this.missingBinanceByCoin.get(market.coin) || 0) + 1);
       }
-      this.replay.recordTick('signal_reject', `${market.conditionId}:${reason}`, {
+      this.replay.record('signal_reject', {
         conditionId: market.conditionId,
         slug: market.slug,
         coin: market.coin,
@@ -447,11 +452,52 @@ class LeadLagBot {
     const binanceDeltaBps = toBps(spot.price, baseline);
     const binancePulseBps = this.getBinancePulseBps(market.coin);
     const macroTrendBps = this.getBinanceTrendBps(market.coin);
-    const direction = chooseDirection(binanceDeltaBps, chainlinkDeltaBps, strategy, macroTrendBps, this.config.trendBiasBps);
+    this.replay.record('direction_eval', {
+      conditionId: market.conditionId,
+      slug: market.slug,
+      coin: market.coin,
+      duration: market.duration,
+      baseline,
+      timeRemainingSec,
+      binanceDeltaBps,
+      chainlinkDeltaBps,
+      binancePulseBps,
+      macroTrendBps,
+      trendBiasBps: this.config.trendBiasBps,
+    });
+    const direction = chooseDirection(
+      binanceDeltaBps,
+      chainlinkDeltaBps,
+      binancePulseBps,
+      strategy,
+      macroTrendBps,
+      this.config.trendBiasBps,
+    );
     if (!direction) {
-      return fail('direction_rejected', { binanceDeltaBps, chainlinkDeltaBps, macroTrendBps });
+      return fail('direction_rejected', { binanceDeltaBps, chainlinkDeltaBps, binancePulseBps, macroTrendBps });
     }
     const sideStrategy = applyTrendToSideStrategy(strategy.sides[direction], direction, macroTrendBps, this.config.trendBiasBps);
+    this.replay.record('direction_chosen', {
+      conditionId: market.conditionId,
+      slug: market.slug,
+      coin: market.coin,
+      duration: market.duration,
+      side: direction,
+      binanceDeltaBps,
+      chainlinkDeltaBps,
+      binancePulseBps,
+      macroTrendBps,
+      thresholds: {
+        binanceTriggerBps: sideStrategy.binanceTriggerBps,
+        minBinancePulseBps: sideStrategy.minBinancePulseBps,
+        minLeadGapBps: sideStrategy.minLeadGapBps,
+        minEdge: sideStrategy.minEdge,
+        minMarketLag: sideStrategy.minMarketLag,
+        maxAsk: sideStrategy.maxAsk,
+        chainlinkOpposeBps: sideStrategy.chainlinkOpposeBps,
+      },
+      timeRemainingSec,
+    });
     if (Math.abs(binancePulseBps) < sideStrategy.minBinancePulseBps) {
       return fail('binance_pulse_too_small', { binancePulseBps, side: direction });
     }
@@ -727,6 +773,20 @@ class LeadLagBot {
     return clamp(entryPrice + delta, Math.min(0.99, entryPrice + 0.01), 0.97);
   }
 
+  private computeLateExitPrice(position: OpenPosition, timeRemainingSec: number): number | null {
+    if (timeRemainingSec > this.config.forceExitSec) return null;
+    const urgency = clamp(1 - (timeRemainingSec / Math.max(this.config.forceExitSec, 1)), 0, 1);
+    const maxLossRoi = Math.min(
+      0.08,
+      Math.max(
+        0.025,
+        (position.entryEdge || 0) * 0.7 + (position.entryLag || 0) * 0.35,
+      ),
+    );
+    const targetRoi = this.config.forceExitMinRoi * (1 - urgency) - maxLossRoi * urgency;
+    return clamp(position.entryPrice * (1 + targetRoi), 0.01, 0.99);
+  }
+
   private async manageOpenPositions(positionIds?: Iterable<string>): Promise<void> {
     const now = Date.now();
     const scopedIds = positionIds ? new Set(positionIds) : null;
@@ -747,10 +807,32 @@ class LeadLagBot {
 
       const timeRemainingSec = (position.endTime - now) / 1000;
       const hitTakeProfit = position.takeProfitPrice != null && bestBid >= position.takeProfitPrice;
-      const lateProfitExit = timeRemainingSec <= this.config.forceExitSec && position.exitFloorPrice != null && bestBid >= position.exitFloorPrice;
-      if (!hitTakeProfit && !lateProfitExit) continue;
+      const lateExitPrice = this.computeLateExitPrice(position, timeRemainingSec);
+      const lateExit = lateExitPrice != null && bestBid >= lateExitPrice;
+      this.replay.record('position_check', {
+        id: position.id,
+        conditionId: position.conditionId,
+        slug: position.slug,
+        coin: position.coin,
+        duration: position.duration,
+        side: position.side,
+        bestBid,
+        entryPrice: position.entryPrice,
+        takeProfitPrice: position.takeProfitPrice ?? null,
+        lateExitPrice,
+        hitTakeProfit,
+        lateExit,
+        timeRemainingSec,
+        entryEdge: position.entryEdge ?? null,
+        entryLag: position.entryLag ?? null,
+      });
+      if (!hitTakeProfit && !lateExit) continue;
 
-      const reason = hitTakeProfit ? 'take_profit' : 'late_profit_exit';
+      const reason = hitTakeProfit
+        ? 'take_profit'
+        : lateExitPrice != null && lateExitPrice >= position.entryPrice
+          ? 'late_profit_exit'
+          : 'late_defensive_exit';
       const success = await this.closeOpenPosition(position, bestBid, reason);
       if (!success) {
         this.exitRetryAfter.set(position.id, Date.now() + 5000);
@@ -1157,21 +1239,21 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
   const down = { ...strategy.sides.DOWN };
 
   if (coin === 'BTC') {
-    up.binanceTriggerBps += duration === '5m' ? 0.1 : 0.15;
-    up.minBinancePulseBps += duration === '5m' ? 0.05 : 0.08;
-    up.minLeadGapBps += duration === '5m' ? 0.03 : 0.05;
-    up.minEdge += duration === '5m' ? 0.001 : 0.002;
-    up.minMarketLag += duration === '5m' ? 0.0005 : 0.001;
-    up.maxAsk = Math.max(0.55, up.maxAsk - 0.01);
+    up.binanceTriggerBps += duration === '5m' ? 0.25 : 0.2;
+    up.minBinancePulseBps += duration === '5m' ? 0.08 : 0.1;
+    up.minLeadGapBps += duration === '5m' ? 0.05 : 0.06;
+    up.minEdge += duration === '5m' ? 0.015 : 0.006;
+    up.minMarketLag += duration === '5m' ? 0.004 : 0.0015;
+    up.maxAsk = Math.max(0.55, up.maxAsk - (duration === '5m' ? 0.05 : 0.03));
   }
 
   if (coin === 'ETH') {
-    up.binanceTriggerBps += duration === '5m' ? 0.4 : 0.45;
-    up.minBinancePulseBps += duration === '5m' ? 0.15 : 0.2;
+    up.binanceTriggerBps += duration === '5m' ? 0.45 : 0.45;
+    up.minBinancePulseBps += duration === '5m' ? 0.16 : 0.2;
     up.minLeadGapBps += duration === '5m' ? 0.1 : 0.12;
-    up.minEdge += duration === '5m' ? 0.004 : 0.005;
-    up.minMarketLag += duration === '5m' ? 0.0025 : 0.003;
-    up.maxAsk = Math.max(0.5, up.maxAsk - 0.05);
+    up.minEdge += duration === '5m' ? 0.005 : 0.005;
+    up.minMarketLag += duration === '5m' ? 0.002 : 0.003;
+    up.maxAsk = Math.max(0.5, up.maxAsk - (duration === '5m' ? 0.1 : 0.05));
   }
 
   return {
@@ -1187,45 +1269,74 @@ function applyTrendToSideStrategy(sideStrategy: StrategyProfile['sides'][Side], 
   const adjusted = { ...sideStrategy };
   if (macroTrendBps <= -trendBiasBps) {
     if (side === 'UP') {
-      adjusted.binanceTriggerBps += 0.35;
-      adjusted.minBinancePulseBps += 0.12;
-      adjusted.minLeadGapBps += 0.08;
-      adjusted.minEdge += 0.004;
-      adjusted.minMarketLag += 0.002;
+      adjusted.binanceTriggerBps += 0.45;
+      adjusted.minBinancePulseBps += 0.15;
+      adjusted.minLeadGapBps += 0.1;
+      adjusted.minEdge += 0.006;
+      adjusted.minMarketLag += 0.003;
       adjusted.maxAsk = Math.max(0.5, adjusted.maxAsk - 0.04);
     } else {
-      adjusted.binanceTriggerBps = Math.max(0.6, adjusted.binanceTriggerBps - 0.12);
-      adjusted.minBinancePulseBps = Math.max(0.15, adjusted.minBinancePulseBps - 0.05);
-      adjusted.minLeadGapBps = Math.max(0.08, adjusted.minLeadGapBps - 0.04);
-      adjusted.minEdge = Math.max(0.006, adjusted.minEdge - 0.002);
-      adjusted.minMarketLag = Math.max(0.002, adjusted.minMarketLag - 0.001);
-      adjusted.maxAsk = Math.min(0.95, adjusted.maxAsk + 0.02);
+      adjusted.binanceTriggerBps = Math.max(0.55, adjusted.binanceTriggerBps - 0.2);
+      adjusted.minBinancePulseBps = Math.max(0.14, adjusted.minBinancePulseBps - 0.08);
+      adjusted.minLeadGapBps = Math.max(0.06, adjusted.minLeadGapBps - 0.06);
+      adjusted.minEdge = Math.max(0.006, adjusted.minEdge - 0.003);
+      adjusted.minMarketLag = Math.max(0.002, adjusted.minMarketLag - 0.0015);
+      adjusted.maxAsk = Math.min(0.82, adjusted.maxAsk + 0.01);
     }
   } else if (macroTrendBps >= trendBiasBps) {
     if (side === 'DOWN') {
-      adjusted.binanceTriggerBps += 0.2;
-      adjusted.minBinancePulseBps += 0.08;
-      adjusted.minLeadGapBps += 0.06;
-      adjusted.minEdge += 0.002;
-      adjusted.minMarketLag += 0.001;
+      adjusted.binanceTriggerBps += 0.3;
+      adjusted.minBinancePulseBps += 0.1;
+      adjusted.minLeadGapBps += 0.08;
+      adjusted.minEdge += 0.003;
+      adjusted.minMarketLag += 0.0015;
       adjusted.maxAsk = Math.max(0.5, adjusted.maxAsk - 0.02);
     }
   }
   return adjusted;
 }
 
-function chooseDirection(binanceDeltaBps: number, chainlinkDeltaBps: number, strategy: StrategyProfile, macroTrendBps: number, trendBiasBps: number): Side | null {
+function chooseDirection(
+  binanceDeltaBps: number,
+  chainlinkDeltaBps: number,
+  binancePulseBps: number,
+  strategy: StrategyProfile,
+  macroTrendBps: number,
+  trendBiasBps: number,
+): Side | null {
+  const upStrategy = applyTrendToSideStrategy(strategy.sides.UP, 'UP', macroTrendBps, trendBiasBps);
+  const downStrategy = applyTrendToSideStrategy(strategy.sides.DOWN, 'DOWN', macroTrendBps, trendBiasBps);
+  const trendAssistBps = clamp(macroTrendBps * 0.22, -1.6, 1.6);
+  const pulseAssistBps = clamp(binancePulseBps * 0.8, -1.2, 1.2);
+  const chainAssistBps = clamp(chainlinkDeltaBps * 0.3, -0.8, 0.8);
+  const adjustedDeltaBps = binanceDeltaBps + trendAssistBps + pulseAssistBps + chainAssistBps;
+  const upMargin = adjustedDeltaBps - upStrategy.binanceTriggerBps;
+  const downMargin = -adjustedDeltaBps - downStrategy.binanceTriggerBps;
   let direction: Side | null = null;
-  if (binanceDeltaBps >= strategy.sides.UP.binanceTriggerBps) direction = 'UP';
-  else if (binanceDeltaBps <= -strategy.sides.DOWN.binanceTriggerBps) direction = 'DOWN';
-  else return null;
+  if (upMargin >= 0 || downMargin >= 0) {
+    direction = upMargin >= downMargin ? 'UP' : 'DOWN';
+  } else {
+    return null;
+  }
 
   const binanceSign = direction === 'UP' ? 1 : -1;
   const chainSign = Math.sign(chainlinkDeltaBps);
-  const sideStrategy = strategy.sides[direction];
+  const sideStrategy = direction === 'UP' ? upStrategy : downStrategy;
 
   if (chainSign !== 0 && chainSign !== binanceSign && Math.abs(chainlinkDeltaBps) >= sideStrategy.chainlinkOpposeBps) {
     return null;
+  }
+
+  // In strong trend regimes, avoid taking weak counter-trend bounces.
+  if (macroTrendBps <= -trendBiasBps && direction === 'UP') {
+    const extraImpulseBps = Math.min(1.2, Math.abs(macroTrendBps) * 0.08);
+    const strongBounce = binanceDeltaBps >= upStrategy.binanceTriggerBps + extraImpulseBps;
+    if (!strongBounce || binancePulseBps <= 0) return null;
+  }
+  if (macroTrendBps >= trendBiasBps && direction === 'DOWN') {
+    const extraImpulseBps = Math.min(1.2, Math.abs(macroTrendBps) * 0.08);
+    const strongDump = binanceDeltaBps <= -(downStrategy.binanceTriggerBps + extraImpulseBps);
+    if (!strongDump || binancePulseBps >= 0) return null;
   }
 
   return direction;
