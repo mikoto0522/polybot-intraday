@@ -819,11 +819,24 @@ class LeadLagBot {
       if (!book || now - book.timestamp > strategy.maxBookAgeMs) continue;
       const bestBid = book.bestBid;
       if (bestBid <= 0) continue;
+      const spot = this.binance.get(position.coin);
+      const currentDeltaBps = spot && spot.price > 0 ? toBps(spot.price, position.baseline) : null;
+      const currentWinner = currentDeltaBps == null
+        ? null
+        : currentDeltaBps > 0
+          ? 'UP'
+          : currentDeltaBps < 0
+            ? 'DOWN'
+            : null;
 
       const timeRemainingSec = (position.endTime - now) / 1000;
       const hitTakeProfit = position.takeProfitPrice != null && bestBid >= position.takeProfitPrice;
       const lateExitPrice = this.computeLateExitPrice(position, timeRemainingSec);
-      const hardExit = timeRemainingSec <= this.config.hardExitSec;
+      const hardExit = this.config.hardExitSec > 0
+        && timeRemainingSec <= this.config.hardExitSec
+        && currentWinner != null
+        && currentWinner !== position.side
+        && bestBid < position.entryPrice;
       const lateExit = hardExit || (lateExitPrice != null && bestBid >= lateExitPrice);
       this.replay.record('position_check', {
         id: position.id,
@@ -839,6 +852,8 @@ class LeadLagBot {
         hitTakeProfit,
         lateExit,
         hardExit,
+        currentDeltaBps,
+        currentWinner,
         timeRemainingSec,
         entryEdge: position.entryEdge ?? null,
         entryLag: position.entryLag ?? null,
