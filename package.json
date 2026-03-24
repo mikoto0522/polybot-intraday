@@ -9,7 +9,10 @@
     "live": "tsx src/index.ts --live",
     "paper": "tsx src/index.ts --paper",
     "dry-run": "tsx src/index.ts --dry-run",
-    "analyze-run": "tsx src/analyze-run.ts"
+    "analyze-run": "tsx src/analyze-run.ts",
+    "collect-market-data": "tsx src/collect-market-data.ts",
+    "backtest-run": "tsx src/backtest-run.ts",
+    "sweep-params": "tsx src/sweep-params.ts"
   },
   "dependencies": {
     "@polymarket/clob-client": "^5.8.0",
