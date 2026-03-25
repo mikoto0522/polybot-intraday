@@ -17,6 +17,7 @@ import type {
   OrderbookSnapshot,
   Side,
   SignalCandidate,
+  StrategyKind,
   TokenBook,
   TrackedMarket,
 } from './types.js';
@@ -127,6 +128,26 @@ class LeadLagBot {
       minHoldSec: this.config.minHoldSec,
       forceExitSec: this.config.forceExitSec,
       hardExitSec: this.config.hardExitSec,
+      lotteryEnabled: this.config.lotteryEnabled,
+      lotteryBudget: this.config.lotteryBudget,
+      lotteryCloseWindowSec: this.config.lotteryCloseWindowSec,
+      lotteryMinSignalAsk: this.config.lotteryMinSignalAsk,
+      lotteryMaxSignalAsk: this.config.lotteryMaxSignalAsk,
+      lotteryMinEdge: this.config.lotteryMinEdge,
+      lotteryMinLag: this.config.lotteryMinLag,
+      lotteryMinScore: this.config.lotteryMinScore,
+      lotteryMinPulseBps: this.config.lotteryMinPulseBps,
+      lotteryMinTrendBps: this.config.lotteryMinTrendBps,
+      lotteryMinBinanceDeltaBps: this.config.lotteryMinBinanceDeltaBps,
+      lotteryMinLeadGapBps: this.config.lotteryMinLeadGapBps,
+      lotteryMaxTopBookValue: this.config.lotteryMaxTopBookValue,
+      lotteryMaxSpread: this.config.lotteryMaxSpread,
+      settlementGuardSec: this.config.settlementGuardSec,
+      settlementMaxAsk: this.config.settlementMaxAsk,
+      settlementMinEdge: this.config.settlementMinEdge,
+      settlementMinLag: this.config.settlementMinLag,
+      countertrendExitSec: this.config.countertrendExitSec,
+      countertrendExitBps: this.config.countertrendExitBps,
       forceExitMinRoi: this.config.forceExitMinRoi,
     });
 
@@ -329,10 +350,14 @@ class LeadLagBot {
     const openPositions = this.state.getOpenPositions();
     if (openPositions.length >= this.config.maxOpenPositions) return;
     let slotsRemaining = this.config.maxOpenPositions - openPositions.length;
+    let budgetRemaining = this.config.mode === 'paper' ? this.state.getPaperBalance() : Number.POSITIVE_INFINITY;
     if (this.config.mode === 'paper') {
+      const minimumStake = this.config.lotteryEnabled
+        ? Math.max(0.01, Math.min(this.config.budget, this.config.lotteryBudget))
+        : this.config.budget;
       slotsRemaining = Math.min(
         slotsRemaining,
-        Math.floor(this.state.getPaperBalance() / this.config.budget),
+        Math.floor(this.state.getPaperBalance() / minimumStake),
       );
     }
     if (slotsRemaining <= 0) return;
@@ -360,7 +385,8 @@ class LeadLagBot {
       const timeRemainingSec = (market.endTime - now) / 1000;
       if (timeRemainingSec > strategy.closeWindowSec || timeRemainingSec <= 1) continue;
 
-      const signal = this.buildSignal(market, timeRemainingSec);
+      const signal = this.buildSignal(market, timeRemainingSec)
+        || this.buildLotterySignal(market, timeRemainingSec);
       if (!signal) continue;
 
       candidates.push({ market, signal });
@@ -370,6 +396,7 @@ class LeadLagBot {
     const reservedByCoin = new Map<Coin, number>();
     for (const { market, signal } of candidates.sort((a, b) => b.signal.score - a.signal.score)) {
       if (selected.length >= slotsRemaining) break;
+      if (signal.stake > budgetRemaining) continue;
       const currentCoinOpen = openByCoin.get(market.coin) || 0;
       const currentCoinReserved = reservedByCoin.get(market.coin) || 0;
       if (currentCoinOpen + currentCoinReserved >= this.config.maxOpenPositionsPerCoin) {
@@ -378,6 +405,7 @@ class LeadLagBot {
 
       selected.push({ market, signal });
       reservedByCoin.set(market.coin, currentCoinReserved + 1);
+      budgetRemaining -= signal.stake;
     }
 
     for (const { market, signal } of selected) {
@@ -393,16 +421,20 @@ class LeadLagBot {
           .map(({ market, signal }) => ({
             slug: market.slug,
             coin: market.coin,
+            strategyKind: signal.strategyKind,
             side: signal.side,
             score: signal.score,
             edge: signal.edge,
             ask: signal.ask,
+            stake: signal.stake,
           })),
         selectedMarkets: selected.map(({ market, signal }) => ({
           slug: market.slug,
           coin: market.coin,
+          strategyKind: signal.strategyKind,
           side: signal.side,
           score: signal.score,
+          stake: signal.stake,
         })),
       });
     }
@@ -411,7 +443,7 @@ class LeadLagBot {
   private buildSignal(market: TrackedMarket, timeRemainingSec: number): SignalCandidate | null {
     const fail = (reason: string, extra: Record<string, unknown> = {}): null => {
       const side = typeof extra.side === 'string' ? extra.side : 'NA';
-      const rejectKey = `${market.conditionId}:${reason}:${side}`;
+      const rejectKey = `${market.conditionId}:main:${reason}:${side}`;
       const now = Date.now();
       const last = this.recentRejects.get(rejectKey) || 0;
       if (now - last < 1500) {
@@ -427,6 +459,7 @@ class LeadLagBot {
         slug: market.slug,
         coin: market.coin,
         duration: market.duration,
+        strategyKind: 'main',
         reason,
         timeRemainingSec,
         ...extra,
@@ -527,14 +560,26 @@ class LeadLagBot {
     if (now - askBook.timestamp > strategy.maxBookAgeMs) {
       return fail('stale_orderbook', { ageMs: now - askBook.timestamp });
     }
-    if (askBook.askSize * ask < strategy.minTopBookValue) {
-      return fail('top_book_value_too_small', { topBookValue: askBook.askSize * ask });
+    const topBookValue = askBook.askSize * ask;
+    if (topBookValue < strategy.minTopBookValue) {
+      return fail('top_book_value_too_small', { topBookValue });
     }
     if (askBook.spread > strategy.maxSpread) {
       return fail('spread_too_wide', { spread: askBook.spread });
     }
     if (ask <= 0 || ask > sideStrategy.maxAsk) {
       return fail('ask_out_of_range', { ask, side: direction });
+    }
+    const coinBookRejectReason = getCoinBookRejectReason(
+      market.coin,
+      market.duration,
+      direction,
+      ask,
+      askBook.spread,
+      topBookValue,
+    );
+    if (coinBookRejectReason) {
+      return fail(coinBookRejectReason, { side: direction, ask, spread: askBook.spread, topBookValue });
     }
 
     const chainAligned = !chainAvailable || Math.sign(chainlinkDeltaBps) === 0 || Math.sign(chainlinkDeltaBps) === Math.sign(binanceDeltaBps);
@@ -561,9 +606,19 @@ class LeadLagBot {
       + marketLag * 60
       + Math.abs(binancePulseBps) * 1.2
       + leadGapBps * 1.1
-      + (askBook.askSize * ask) * 0.02
+      + topBookValue * 0.02
       - askBook.spread * 30
       - ask * 4;
+    const coinSignalQualityRejectReason = getCoinSignalQualityRejectReason(
+      market.coin,
+      market.duration,
+      direction,
+      score,
+      edge,
+    );
+    if (coinSignalQualityRejectReason) {
+      return fail(coinSignalQualityRejectReason, { side: direction, score, edge, topBookValue });
+    }
 
     const marketToDecisionMs = Math.max(
       0,
@@ -577,6 +632,8 @@ class LeadLagBot {
     );
 
     const signal = {
+      strategyKind: 'main' as StrategyKind,
+      stake: this.config.budget,
       side: direction,
       score,
       ask,
@@ -601,10 +658,188 @@ class LeadLagBot {
       slug: market.slug,
       coin: market.coin,
       duration: market.duration,
+      strategyKind: signal.strategyKind,
       side: signal.side,
       score: signal.score,
       ask: signal.ask,
       askSize: signal.askSize,
+      stake: signal.stake,
+      spread: signal.spread,
+      impliedProb: signal.impliedProb,
+      edge: signal.edge,
+      marketMid: signal.marketMid,
+      marketLag: signal.marketLag,
+      chainlinkDeltaBps: signal.chainlinkDeltaBps,
+      chainAvailable,
+      binanceDeltaBps: signal.binanceDeltaBps,
+      binancePulseBps: signal.binancePulseBps,
+      leadGapBps: signal.leadGapBps,
+      marketToDecisionMs,
+      baseline,
+      macroTrendBps,
+      timeRemainingSec,
+    });
+
+    return signal;
+  }
+
+  private buildLotterySignal(market: TrackedMarket, timeRemainingSec: number): SignalCandidate | null {
+    if (!this.config.lotteryEnabled) return null;
+
+    const fail = (reason: string, extra: Record<string, unknown> = {}): null => {
+      const side = typeof extra.side === 'string' ? extra.side : 'UP';
+      const rejectKey = `${market.conditionId}:lottery:${reason}:${side}`;
+      const now = Date.now();
+      const last = this.recentRejects.get(rejectKey) || 0;
+      if (now - last < 1500) {
+        return null;
+      }
+      this.recentRejects.set(rejectKey, now);
+      this.rejectCounts.set(reason, (this.rejectCounts.get(reason) || 0) + 1);
+      this.replay.record('signal_reject', {
+        conditionId: market.conditionId,
+        slug: market.slug,
+        coin: market.coin,
+        duration: market.duration,
+        strategyKind: 'lottery',
+        reason,
+        timeRemainingSec,
+        ...extra,
+      });
+      return null;
+    };
+
+    if (market.duration !== '5m') return null;
+    if (timeRemainingSec > this.config.lotteryCloseWindowSec || timeRemainingSec <= 1) {
+      return null;
+    }
+
+    const strategy = this.getStrategyProfile(market.duration, market.coin);
+    const baseline = market.baseline;
+    if (baseline == null) return fail('lottery_missing_baseline');
+
+    const chain = this.chainlink.get(market.coin);
+    const spot = this.binance.get(market.coin);
+    if (!spot) return fail('lottery_missing_binance');
+
+    const now = Date.now();
+    if (now - spot.timestamp > strategy.maxExternalAgeMs) {
+      return fail('lottery_stale_binance', { ageMs: now - spot.timestamp });
+    }
+
+    const upBook = this.orderbooks.get(market.upTokenId);
+    const downBook = this.orderbooks.get(market.downTokenId);
+    if (!upBook || !downBook) return fail('lottery_missing_orderbook');
+    if (now - upBook.timestamp > strategy.maxBookAgeMs || now - downBook.timestamp > strategy.maxBookAgeMs) {
+      return fail('lottery_stale_orderbook', {
+        upAgeMs: now - upBook.timestamp,
+        downAgeMs: now - downBook.timestamp,
+      });
+    }
+
+    const chainAvailable = !!chain && now - chain.timestamp <= strategy.maxExternalAgeMs;
+    const chainlinkDeltaBps = chainAvailable && chain ? toBps(chain.price, baseline) : 0;
+    const binanceDeltaBps = toBps(spot.price, baseline);
+    const binancePulseBps = this.getBinancePulseBps(market.coin);
+    const macroTrendBps = this.getBinanceTrendBps(market.coin);
+    const ask = upBook.bestAsk;
+    const topBookValue = ask * upBook.askSize;
+    const leadGapBps = Math.abs(binanceDeltaBps - chainlinkDeltaBps);
+
+    if (binanceDeltaBps < this.config.lotteryMinBinanceDeltaBps) {
+      return fail('lottery_binance_delta_too_small', { binanceDeltaBps, side: 'UP' });
+    }
+    if (binancePulseBps < this.config.lotteryMinPulseBps) {
+      return fail('lottery_binance_pulse_too_small', { binancePulseBps, side: 'UP' });
+    }
+    if (macroTrendBps < this.config.lotteryMinTrendBps) {
+      return fail('lottery_trend_too_small', { macroTrendBps, side: 'UP' });
+    }
+    if (ask < this.config.lotteryMinSignalAsk || ask > this.config.lotteryMaxSignalAsk) {
+      return fail('lottery_ask_out_of_range', { ask, side: 'UP' });
+    }
+    if (upBook.spread > this.config.lotteryMaxSpread) {
+      return fail('lottery_spread_too_wide', { spread: upBook.spread, side: 'UP' });
+    }
+    if (topBookValue <= 0 || topBookValue > this.config.lotteryMaxTopBookValue) {
+      return fail('lottery_top_book_out_of_range', { topBookValue, side: 'UP' });
+    }
+    if (leadGapBps < this.config.lotteryMinLeadGapBps) {
+      return fail('lottery_lead_gap_too_small', { leadGapBps, side: 'UP' });
+    }
+
+    const chainAligned = !chainAvailable || Math.sign(chainlinkDeltaBps) >= 0;
+    const anchorBonusBps = chainAligned
+      ? Math.min(Math.abs(chainlinkDeltaBps), strategy.chainlinkConfirmBps * 2)
+      : 0;
+    const pulseBonus = Math.abs(binancePulseBps) * 0.9;
+    const strengthBps = Math.abs(binanceDeltaBps) + leadGapBps * 0.7 + anchorBonusBps * 0.4 + pulseBonus;
+    const certainty = clamp(1 - (timeRemainingSec / strategy.closeWindowSec), 0.2, 1);
+    const impliedProb = clamp(0.5 + (strengthBps / strategy.fairScaleBps) * 0.47 * certainty, 0.5, 0.97);
+    const marketMid = clamp((ask + (1 - downBook.bestBid)) / 2, 0, 1);
+    const marketLag = impliedProb - marketMid;
+    const edge = impliedProb - ask - strategy.executionBuffer;
+
+    if (marketLag < this.config.lotteryMinLag) {
+      return fail('lottery_market_lag_too_small', { marketLag, impliedProb, marketMid, side: 'UP' });
+    }
+    if (edge < this.config.lotteryMinEdge) {
+      return fail('lottery_edge_too_small', { edge, impliedProb, ask, side: 'UP' });
+    }
+
+    const score = edge * 100
+      + marketLag * 60
+      + Math.abs(binancePulseBps) * 1.2
+      + leadGapBps * 1.1
+      + topBookValue * 0.02
+      - upBook.spread * 30
+      - ask * 4;
+    if (score < this.config.lotteryMinScore) {
+      return fail('lottery_score_too_small', { score, side: 'UP' });
+    }
+
+    const marketToDecisionMs = Math.max(
+      0,
+      now - Math.max(
+        spot.timestamp,
+        upBook.timestamp,
+        downBook.timestamp,
+        chainAvailable && chain ? chain.timestamp : 0,
+      ),
+    );
+
+    const signal = {
+      strategyKind: 'lottery' as StrategyKind,
+      stake: this.config.lotteryBudget,
+      side: 'UP' as Side,
+      score,
+      ask,
+      askSize: upBook.askSize,
+      spread: upBook.spread,
+      impliedProb,
+      edge,
+      marketMid,
+      marketLag,
+      chainlinkDeltaBps,
+      chainAvailable,
+      binanceDeltaBps,
+      binancePulseBps,
+      leadGapBps,
+      marketToDecisionMs,
+    };
+
+    this.latency.record('market_to_decision', marketToDecisionMs);
+    this.replay.record('signal', {
+      conditionId: market.conditionId,
+      slug: market.slug,
+      coin: market.coin,
+      duration: market.duration,
+      strategyKind: signal.strategyKind,
+      side: signal.side,
+      score: signal.score,
+      ask: signal.ask,
+      askSize: signal.askSize,
+      stake: signal.stake,
       spread: signal.spread,
       impliedProb: signal.impliedProb,
       edge: signal.edge,
@@ -628,17 +863,18 @@ class LeadLagBot {
     if (this.state.hasOpenPosition(market.conditionId)) return;
 
     const tokenId = signal.side === 'UP' ? market.upTokenId : market.downTokenId;
-    const strategy = this.getStrategyProfile(market.duration);
+    const strategy = this.getStrategyProfile(market.duration, market.coin);
+    const stake = signal.stake;
     let fillAsk = signal.ask;
-    let shares = this.config.budget / fillAsk;
+    let shares = stake / fillAsk;
 
-    if (this.config.mode === 'paper' && this.state.getPaperBalance() < this.config.budget) {
+    if (this.config.mode === 'paper' && this.state.getPaperBalance() < stake) {
       this.log.warn(`[SKIP] Paper balance too low for ${market.slug}`);
       return;
     }
 
     this.log.trade(
-      `[ENTRY] ${signal.side} ${market.slug} ask=${signal.ask.toFixed(3)} ` +
+      `[ENTRY ${signal.strategyKind.toUpperCase()}] ${signal.side} ${market.slug} ask=${signal.ask.toFixed(3)} stake=$${stake.toFixed(2)} ` +
       `score=${signal.score.toFixed(1)} ` +
       `edge=${signal.edge.toFixed(3)} lag=${signal.marketLag.toFixed(3)} ` +
       `binance=${signal.binanceDeltaBps.toFixed(1)}bps pulse=${signal.binancePulseBps.toFixed(1)}bps ` +
@@ -652,9 +888,11 @@ class LeadLagBot {
       this.replay.record('entry_dry_run', {
         conditionId: market.conditionId,
         slug: market.slug,
+        strategyKind: signal.strategyKind,
         side: signal.side,
         score: signal.score,
         ask: signal.ask,
+        stake,
         impliedProb: signal.impliedProb,
         edge: signal.edge,
         marketLag: signal.marketLag,
@@ -669,7 +907,7 @@ class LeadLagBot {
     }
 
     if (this.config.mode === 'live') {
-      const result = await this.live!.createMarketBuy(tokenId, this.config.budget);
+      const result = await this.live!.createMarketBuy(tokenId, stake);
       const decisionToOrderMs = Date.now() - decisionStartedAt;
       this.latency.record('decision_to_order', decisionToOrderMs);
       if (!result.success) {
@@ -678,7 +916,9 @@ class LeadLagBot {
           mode: this.config.mode,
           conditionId: market.conditionId,
           slug: market.slug,
+          strategyKind: signal.strategyKind,
           side: signal.side,
+          stake,
           error: result.errorMsg || 'unknown error',
           marketToDecisionMs: signal.marketToDecisionMs,
           decisionToOrderMs,
@@ -689,10 +929,11 @@ class LeadLagBot {
       this.replay.record('entry_live', {
         conditionId: market.conditionId,
         slug: market.slug,
+        strategyKind: signal.strategyKind,
         side: signal.side,
         score: signal.score,
         ask: fillAsk,
-        stake: this.config.budget,
+        stake,
         shares,
         edge: signal.edge,
         marketLag: signal.marketLag,
@@ -716,7 +957,9 @@ class LeadLagBot {
           mode: this.config.mode,
           conditionId: market.conditionId,
           slug: market.slug,
+          strategyKind: signal.strategyKind,
           side: signal.side,
+          stake,
           error: 'paper_fill_unavailable',
           paperDelayMs: fillDelayMs,
           marketToDecisionMs: signal.marketToDecisionMs,
@@ -726,17 +969,18 @@ class LeadLagBot {
       }
 
       fillAsk = fillBook.bestAsk;
-      shares = this.config.budget / fillAsk;
+      shares = stake / fillAsk;
       const decisionToOrderMs = Date.now() - decisionStartedAt;
       this.latency.record('decision_to_order', decisionToOrderMs);
-      this.state.setPaperBalance(this.state.getPaperBalance() - this.config.budget);
+      this.state.setPaperBalance(this.state.getPaperBalance() - stake);
       this.replay.record('entry_paper', {
         conditionId: market.conditionId,
         slug: market.slug,
+        strategyKind: signal.strategyKind,
         side: signal.side,
         score: signal.score,
         ask: fillAsk,
-        stake: this.config.budget,
+        stake,
         shares,
         edge: signal.edge,
         marketLag: signal.marketLag,
@@ -759,18 +1003,21 @@ class LeadLagBot {
       upTokenId: market.upTokenId,
       downTokenId: market.downTokenId,
       baseline: market.baseline!,
-      stake: this.config.budget,
+      stake,
       entryPrice: fillAsk,
       shares,
       openedAt: Date.now(),
       endTime: market.endTime,
       mode: this.config.mode,
+      strategyKind: signal.strategyKind,
       takeProfitPrice: this.computeTakeProfitPrice(market, fillAsk, signal),
       exitFloorPrice: fillAsk * (1 + this.config.forceExitMinRoi),
       minHoldUntil: Date.now() + this.config.minHoldSec * 1000,
+      entryScore: signal.score,
       entryEdge: signal.edge,
       entryLag: signal.marketLag,
       entryImpliedProb: signal.impliedProb,
+      settlementEligible: this.isSettlementEligible(fillAsk, signal),
     };
 
     this.state.addPosition(position);
@@ -786,6 +1033,12 @@ class LeadLagBot {
       delta = Math.min(0.09, Math.max(this.config.takeProfitMinPriceDelta, delta * 0.55));
     }
     return clamp(entryPrice + delta, Math.min(0.99, entryPrice + 0.01), 0.97);
+  }
+
+  private isSettlementEligible(entryPrice: number, signal: SignalCandidate): boolean {
+    return entryPrice <= this.config.settlementMaxAsk
+      && signal.edge >= this.config.settlementMinEdge
+      && signal.marketLag >= this.config.settlementMinLag;
   }
 
   private computeLateExitPrice(position: OpenPosition, timeRemainingSec: number): number | null {
@@ -832,11 +1085,21 @@ class LeadLagBot {
       const timeRemainingSec = (position.endTime - now) / 1000;
       const hitTakeProfit = position.takeProfitPrice != null && bestBid >= position.takeProfitPrice;
       const lateExitPrice = this.computeLateExitPrice(position, timeRemainingSec);
-      const hardExit = this.config.hardExitSec > 0
+      const settlementEligible = position.settlementEligible !== false;
+      const configHardExit = this.config.hardExitSec > 0
         && timeRemainingSec <= this.config.hardExitSec
         && currentWinner != null
         && currentWinner !== position.side
         && bestBid < position.entryPrice;
+      const countertrendGuardExit = !settlementEligible
+        && timeRemainingSec <= this.config.countertrendExitSec
+        && currentWinner != null
+        && currentWinner !== position.side
+        && currentDeltaBps != null
+        && Math.abs(currentDeltaBps) >= this.config.countertrendExitBps;
+      const settlementGuardExit = !settlementEligible
+        && timeRemainingSec <= this.config.settlementGuardSec;
+      const hardExit = configHardExit || countertrendGuardExit || settlementGuardExit;
       const lateExit = hardExit || (lateExitPrice != null && bestBid >= lateExitPrice);
       this.replay.record('position_check', {
         id: position.id,
@@ -844,6 +1107,7 @@ class LeadLagBot {
         slug: position.slug,
         coin: position.coin,
         duration: position.duration,
+        strategyKind: position.strategyKind || 'main',
         side: position.side,
         bestBid,
         entryPrice: position.entryPrice,
@@ -852,9 +1116,13 @@ class LeadLagBot {
         hitTakeProfit,
         lateExit,
         hardExit,
+        settlementEligible,
+        countertrendGuardExit,
+        settlementGuardExit,
         currentDeltaBps,
         currentWinner,
         timeRemainingSec,
+        entryScore: position.entryScore ?? null,
         entryEdge: position.entryEdge ?? null,
         entryLag: position.entryLag ?? null,
       });
@@ -862,10 +1130,14 @@ class LeadLagBot {
 
       const reason = hitTakeProfit
         ? 'take_profit'
-        : hardExit
-          ? bestBid >= position.entryPrice
-            ? 'expiry_profit_exit'
-            : 'expiry_defensive_exit'
+        : countertrendGuardExit
+          ? 'countertrend_guard_exit'
+          : settlementGuardExit
+            ? 'pre_settlement_exit'
+            : configHardExit
+              ? bestBid >= position.entryPrice
+                ? 'expiry_profit_exit'
+                : 'expiry_defensive_exit'
           : lateExitPrice != null && lateExitPrice >= position.entryPrice
             ? 'late_profit_exit'
             : 'late_defensive_exit';
@@ -890,6 +1162,7 @@ class LeadLagBot {
           mode: this.config.mode,
           conditionId: position.conditionId,
           slug: position.slug,
+          strategyKind: position.strategyKind || 'main',
           side: position.side,
           reason,
           error: result.errorMsg || 'market sell rejected',
@@ -903,10 +1176,11 @@ class LeadLagBot {
     }
 
     this.state.closePosition(position.id, estimatedPayout, realizedPnl, 'intraday', exitPrice);
-    this.log.trade(`[EXIT] ${position.slug} ${position.side} reason=${reason} exit=$${exitPrice.toFixed(3)} pnl=$${realizedPnl.toFixed(2)}`);
+    this.log.trade(`[EXIT ${String(position.strategyKind || 'main').toUpperCase()}] ${position.slug} ${position.side} reason=${reason} exit=$${exitPrice.toFixed(3)} pnl=$${realizedPnl.toFixed(2)}`);
     this.replay.record(this.config.mode === 'live' ? 'exit_live' : 'exit_paper', {
       conditionId: position.conditionId,
       slug: position.slug,
+      strategyKind: position.strategyKind || 'main',
       side: position.side,
       reason,
       exitPrice,
@@ -962,14 +1236,19 @@ class LeadLagBot {
       const realizedPnl = payout - position.stake;
       this.state.closePosition(position.id, payout, realizedPnl, 'settlement');
       this.log.trade(
-        `[SETTLED] ${position.slug} ${position.side} payout=$${payout.toFixed(2)} pnl=$${realizedPnl.toFixed(2)}`,
+        `[SETTLED ${String(position.strategyKind || 'main').toUpperCase()}] ${position.slug} ${position.side} payout=$${payout.toFixed(2)} pnl=$${realizedPnl.toFixed(2)}`,
       );
       this.replay.record('settled', {
         id: position.id,
         mode: this.config.mode,
         conditionId: position.conditionId,
         slug: position.slug,
+        strategyKind: position.strategyKind || 'main',
         side: position.side,
+        settlementEligible: position.settlementEligible !== false,
+        entryScore: position.entryScore ?? null,
+        entryEdge: position.entryEdge ?? null,
+        entryLag: position.entryLag ?? null,
         payout,
         realizedPnl,
         stake: position.stake,
@@ -1280,7 +1559,7 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
     up.minLeadGapBps += duration === '5m' ? 0.05 : 0.06;
     up.minEdge += duration === '5m' ? 0.015 : 0.006;
     up.minMarketLag += duration === '5m' ? 0.004 : 0.0015;
-    up.maxAsk = Math.max(0.55, up.maxAsk - (duration === '5m' ? 0.05 : 0.03));
+    up.maxAsk = Math.max(0.5, up.maxAsk - (duration === '5m' ? 0.1 : 0.03));
   }
 
   if (coin === 'ETH') {
@@ -1289,7 +1568,7 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
     up.minLeadGapBps += duration === '5m' ? 0.14 : 0.14;
     up.minEdge += duration === '5m' ? 0.012 : 0.008;
     up.minMarketLag += duration === '5m' ? 0.006 : 0.004;
-    up.maxAsk = Math.max(0.48, up.maxAsk - (duration === '5m' ? 0.12 : 0.06));
+    up.maxAsk = Math.max(0.45, up.maxAsk - (duration === '5m' ? 0.2 : 0.06));
   }
 
   return {
@@ -1346,6 +1625,46 @@ function getCoinSideRejectReason(
     if (macroTrendBps <= -12 && (chainlinkDeltaBps < 3 || binancePulseBps < 2.2)) {
       return 'eth_up_countertrend_too_weak';
     }
+  }
+  return null;
+}
+
+function getCoinBookRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  ask: number,
+  spread: number,
+  topBookValue: number,
+): string | null {
+  if (duration === '5m' && side === 'DOWN') {
+    if (spread > 0.02) return 'down_spread_too_wide';
+    if (topBookValue < 5) return 'down_top_book_too_small';
+  }
+  if (coin === 'BTC' && duration === '5m' && side === 'UP') {
+    if (ask > 0.5) return 'btc_up_ask_too_high';
+    if (spread > 0.05) return 'btc_up_spread_too_wide';
+    if (topBookValue < 15) return 'btc_up_top_book_too_small';
+  }
+  if (coin === 'ETH' && duration === '5m' && side === 'UP') {
+    if (ask > 0.45) return 'eth_up_ask_too_high';
+    if (topBookValue < 15) return 'eth_up_top_book_too_small';
+  }
+  return null;
+}
+
+function getCoinSignalQualityRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  score: number,
+  edge: number,
+): string | null {
+  if (duration === '5m' && side === 'DOWN' && edge < 0.015) {
+    return 'down_edge_too_small';
+  }
+  if (coin === 'BTC' && duration === '5m' && side === 'UP' && score < 15) {
+    return 'btc_up_score_too_small';
   }
   return null;
 }

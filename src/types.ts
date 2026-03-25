@@ -6,6 +6,8 @@ export type Duration = '5m' | '15m';
 
 export type Side = 'UP' | 'DOWN';
 
+export type StrategyKind = 'main' | 'lottery';
+
 export interface TokenBook {
   bestBid: number;
   bestAsk: number;
@@ -90,12 +92,15 @@ export interface OpenPosition {
   openedAt: number;
   endTime: number;
   mode: BotMode;
+  strategyKind?: StrategyKind;
   takeProfitPrice?: number;
   exitFloorPrice?: number;
   minHoldUntil?: number;
+  entryScore?: number;
   entryEdge?: number;
   entryLag?: number;
   entryImpliedProb?: number;
+  settlementEligible?: boolean;
   closedBy?: ExitType;
   exitPrice?: number;
   settledAt?: number;
@@ -124,6 +129,8 @@ export interface CryptoPrice {
 }
 
 export interface SignalCandidate {
+  strategyKind: StrategyKind;
+  stake: number;
   side: Side;
   score: number;
   ask: number;

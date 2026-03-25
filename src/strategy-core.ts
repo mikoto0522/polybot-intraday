@@ -13,12 +13,30 @@ export interface SignalInput {
   chainAvailable: boolean;
   binancePulseBps: number;
   macroTrendBps: number;
+  stake?: number;
   maxBookAgeMs?: number;
 }
 
 export interface SignalFailure {
   reason: string;
   details: Record<string, unknown>;
+}
+
+export interface LotterySignalConfig {
+  enabled: boolean;
+  budget: number;
+  closeWindowSec: number;
+  minSignalAsk: number;
+  maxSignalAsk: number;
+  minEdge: number;
+  minLag: number;
+  minScore: number;
+  minPulseBps: number;
+  minTrendBps: number;
+  minBinanceDeltaBps: number;
+  minLeadGapBps: number;
+  maxTopBookValue: number;
+  maxSpread: number;
 }
 
 export function evaluateSignal(input: SignalInput, trendBiasBps: number): { signal: SignalCandidate; sideStrategy: StrategyProfile['sides'][Side] } | { failure: SignalFailure } {
@@ -34,6 +52,7 @@ export function evaluateSignal(input: SignalInput, trendBiasBps: number): { sign
     chainAvailable,
     binancePulseBps,
     macroTrendBps,
+    stake,
   } = input;
 
   const direction = chooseDirection(
@@ -69,14 +88,19 @@ export function evaluateSignal(input: SignalInput, trendBiasBps: number): { sign
 
   const askBook = direction === 'UP' ? upBook : downBook;
   const ask = askBook.bestAsk;
-  if (askBook.askSize * ask < strategy.minTopBookValue) {
-    return { failure: { reason: 'top_book_value_too_small', details: { topBookValue: askBook.askSize * ask } } };
+  const topBookValue = askBook.askSize * ask;
+  if (topBookValue < strategy.minTopBookValue) {
+    return { failure: { reason: 'top_book_value_too_small', details: { topBookValue } } };
   }
   if (askBook.spread > strategy.maxSpread) {
     return { failure: { reason: 'spread_too_wide', details: { spread: askBook.spread } } };
   }
   if (ask <= 0 || ask > sideStrategy.maxAsk) {
     return { failure: { reason: 'ask_out_of_range', details: { side: direction, ask } } };
+  }
+  const coinBookRejectReason = getCoinBookRejectReason(market.coin, market.duration, direction, ask, askBook.spread, topBookValue);
+  if (coinBookRejectReason) {
+    return { failure: { reason: coinBookRejectReason, details: { side: direction, ask, spread: askBook.spread, topBookValue } } };
   }
 
   const chainAligned = !chainAvailable || Math.sign(chainlinkDeltaBps) === 0 || Math.sign(chainlinkDeltaBps) === Math.sign(binanceDeltaBps);
@@ -100,12 +124,24 @@ export function evaluateSignal(input: SignalInput, trendBiasBps: number): { sign
     + marketLag * 60
     + Math.abs(binancePulseBps) * 1.2
     + leadGapBps * 1.1
-    + (askBook.askSize * ask) * 0.02
+    + topBookValue * 0.02
     - askBook.spread * 30
     - ask * 4;
+  const coinSignalQualityRejectReason = getCoinSignalQualityRejectReason(
+    market.coin,
+    market.duration,
+    direction,
+    score,
+    edge,
+  );
+  if (coinSignalQualityRejectReason) {
+    return { failure: { reason: coinSignalQualityRejectReason, details: { side: direction, score, edge, topBookValue } } };
+  }
 
   return {
     signal: {
+      strategyKind: 'main',
+      stake: stake ?? 0,
       side: direction,
       score,
       ask,
@@ -123,6 +159,111 @@ export function evaluateSignal(input: SignalInput, trendBiasBps: number): { sign
       marketToDecisionMs: 0,
     },
     sideStrategy,
+  };
+}
+
+export function evaluateLotterySignal(
+  input: SignalInput,
+  config: LotterySignalConfig,
+): { signal: SignalCandidate } | { failure: SignalFailure } {
+  const {
+    market,
+    strategy,
+    upBook,
+    downBook,
+    timeRemainingSec,
+    binanceDeltaBps,
+    chainlinkDeltaBps,
+    chainAvailable,
+    binancePulseBps,
+    macroTrendBps,
+    stake,
+  } = input;
+
+  if (!config.enabled) {
+    return { failure: { reason: 'lottery_disabled', details: {} } };
+  }
+  if (market.duration !== '5m') {
+    return { failure: { reason: 'lottery_duration_unsupported', details: { duration: market.duration } } };
+  }
+  if (timeRemainingSec > config.closeWindowSec || timeRemainingSec <= 1) {
+    return { failure: { reason: 'lottery_window_miss', details: { timeRemainingSec } } };
+  }
+  if (binanceDeltaBps < config.minBinanceDeltaBps) {
+    return { failure: { reason: 'lottery_binance_delta_too_small', details: { binanceDeltaBps } } };
+  }
+  if (binancePulseBps < config.minPulseBps) {
+    return { failure: { reason: 'lottery_pulse_too_small', details: { binancePulseBps } } };
+  }
+  if (macroTrendBps < config.minTrendBps) {
+    return { failure: { reason: 'lottery_trend_too_small', details: { macroTrendBps } } };
+  }
+
+  const ask = upBook.bestAsk;
+  const topBookValue = upBook.askSize * ask;
+  if (ask < config.minSignalAsk || ask > config.maxSignalAsk) {
+    return { failure: { reason: 'lottery_signal_ask_out_of_range', details: { ask } } };
+  }
+  if (upBook.spread > config.maxSpread) {
+    return { failure: { reason: 'lottery_spread_too_wide', details: { spread: upBook.spread } } };
+  }
+  if (topBookValue <= 0 || topBookValue > config.maxTopBookValue) {
+    return { failure: { reason: 'lottery_top_book_out_of_range', details: { topBookValue } } };
+  }
+
+  const leadGapBps = Math.abs(binanceDeltaBps - chainlinkDeltaBps);
+  if (leadGapBps < config.minLeadGapBps) {
+    return { failure: { reason: 'lottery_lead_gap_too_small', details: { leadGapBps } } };
+  }
+
+  const chainAligned = !chainAvailable || Math.sign(chainlinkDeltaBps) >= 0;
+  const anchorBonusBps = chainAligned ? Math.min(Math.abs(chainlinkDeltaBps), strategy.chainlinkConfirmBps * 2) : 0;
+  const pulseBonus = Math.abs(binancePulseBps) * 0.9;
+  const strengthBps = Math.abs(binanceDeltaBps) + leadGapBps * 0.7 + anchorBonusBps * 0.4 + pulseBonus;
+  const certainty = clamp(1 - (timeRemainingSec / strategy.closeWindowSec), 0.2, 1);
+  const impliedProb = clamp(0.5 + (strengthBps / strategy.fairScaleBps) * 0.47 * certainty, 0.5, 0.97);
+  const oppositeBid = downBook.bestBid;
+  const marketMid = clamp((ask + (1 - oppositeBid)) / 2, 0, 1);
+  const marketLag = impliedProb - marketMid;
+  const edge = impliedProb - ask - strategy.executionBuffer;
+  if (marketLag < config.minLag) {
+    return { failure: { reason: 'lottery_market_lag_too_small', details: { marketLag, impliedProb, marketMid } } };
+  }
+  if (edge < config.minEdge) {
+    return { failure: { reason: 'lottery_edge_too_small', details: { edge, impliedProb, ask } } };
+  }
+
+  const score = edge * 100
+    + marketLag * 60
+    + Math.abs(binancePulseBps) * 1.2
+    + leadGapBps * 1.1
+    + topBookValue * 0.02
+    - upBook.spread * 30
+    - ask * 4;
+  if (score < config.minScore) {
+    return { failure: { reason: 'lottery_score_too_small', details: { score } } };
+  }
+
+  return {
+    signal: {
+      strategyKind: 'lottery',
+      stake: stake ?? config.budget,
+      side: 'UP',
+      score,
+      ask,
+      askSize: upBook.askSize,
+      spread: upBook.spread,
+      impliedProb,
+      edge,
+      marketMid,
+      marketLag,
+      chainlinkDeltaBps,
+      chainAvailable,
+      binanceDeltaBps,
+      binancePulseBps,
+      leadGapBps,
+      marketToDecisionMs: 0,
+    },
   };
 }
 
@@ -162,7 +303,7 @@ export function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Co
     up.minLeadGapBps += duration === '5m' ? 0.05 : 0.06;
     up.minEdge += duration === '5m' ? 0.015 : 0.006;
     up.minMarketLag += duration === '5m' ? 0.004 : 0.0015;
-    up.maxAsk = Math.max(0.55, up.maxAsk - (duration === '5m' ? 0.05 : 0.03));
+    up.maxAsk = Math.max(0.5, up.maxAsk - (duration === '5m' ? 0.1 : 0.03));
   }
 
   if (coin === 'ETH') {
@@ -171,7 +312,7 @@ export function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Co
     up.minLeadGapBps += duration === '5m' ? 0.14 : 0.14;
     up.minEdge += duration === '5m' ? 0.012 : 0.008;
     up.minMarketLag += duration === '5m' ? 0.006 : 0.004;
-    up.maxAsk = Math.max(0.48, up.maxAsk - (duration === '5m' ? 0.12 : 0.06));
+    up.maxAsk = Math.max(0.45, up.maxAsk - (duration === '5m' ? 0.2 : 0.06));
   }
 
   return { ...strategy, sides: { UP: up, DOWN: down } };
@@ -220,6 +361,46 @@ export function getCoinSideRejectReason(
     if (macroTrendBps <= -12 && (chainlinkDeltaBps < 3 || binancePulseBps < 2.2)) {
       return 'eth_up_countertrend_too_weak';
     }
+  }
+  return null;
+}
+
+export function getCoinBookRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  ask: number,
+  spread: number,
+  topBookValue: number,
+): string | null {
+  if (duration === '5m' && side === 'DOWN') {
+    if (spread > 0.02) return 'down_spread_too_wide';
+    if (topBookValue < 5) return 'down_top_book_too_small';
+  }
+  if (coin === 'BTC' && duration === '5m' && side === 'UP') {
+    if (ask > 0.5) return 'btc_up_ask_too_high';
+    if (spread > 0.05) return 'btc_up_spread_too_wide';
+    if (topBookValue < 15) return 'btc_up_top_book_too_small';
+  }
+  if (coin === 'ETH' && duration === '5m' && side === 'UP') {
+    if (ask > 0.45) return 'eth_up_ask_too_high';
+    if (topBookValue < 15) return 'eth_up_top_book_too_small';
+  }
+  return null;
+}
+
+export function getCoinSignalQualityRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  score: number,
+  edge: number,
+): string | null {
+  if (duration === '5m' && side === 'DOWN' && edge < 0.015) {
+    return 'down_edge_too_small';
+  }
+  if (coin === 'BTC' && duration === '5m' && side === 'UP' && score < 15) {
+    return 'btc_up_score_too_small';
   }
   return null;
 }

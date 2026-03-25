@@ -287,8 +287,11 @@ function passesCurrentConfig(signal: SignalPayload, baseStrategy: StrategyProfil
   if (Math.abs(signal.binancePulseBps) < sideStrategy.minBinancePulseBps) return false;
   if (signal.leadGapBps < sideStrategy.minLeadGapBps) return false;
   if (signal.ask <= 0 || signal.ask > sideStrategy.maxAsk) return false;
+  const topBookValue = signal.ask * ('askSize' in signal ? Number(signal.askSize || 0) : 0);
+  if (getCoinBookRejectReason(signal.coin, signal.duration, signal.side, signal.ask, signal.spread, topBookValue)) return false;
   if (signal.marketLag < sideStrategy.minMarketLag) return false;
   if (signal.edge < sideStrategy.minEdge) return false;
+  if (getCoinSignalQualityRejectReason(signal.coin, signal.duration, signal.side, signal.score, signal.edge)) return false;
 
   return true;
 }
@@ -311,6 +314,46 @@ function getCoinSideRejectReason(
   return null;
 }
 
+function getCoinBookRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  ask: number,
+  spread: number,
+  topBookValue: number,
+): string | null {
+  if (duration === '5m' && side === 'DOWN') {
+    if (spread > 0.02) return 'down_spread_too_wide';
+    if (topBookValue < 5) return 'down_top_book_too_small';
+  }
+  if (coin === 'BTC' && duration === '5m' && side === 'UP') {
+    if (ask > 0.5) return 'btc_up_ask_too_high';
+    if (spread > 0.05) return 'btc_up_spread_too_wide';
+    if (topBookValue < 15) return 'btc_up_top_book_too_small';
+  }
+  if (coin === 'ETH' && duration === '5m' && side === 'UP') {
+    if (ask > 0.45) return 'eth_up_ask_too_high';
+    if (topBookValue < 15) return 'eth_up_top_book_too_small';
+  }
+  return null;
+}
+
+function getCoinSignalQualityRejectReason(
+  coin: Coin,
+  duration: Duration,
+  side: Side,
+  score: number,
+  edge: number,
+): string | null {
+  if (duration === '5m' && side === 'DOWN' && edge < 0.015) {
+    return 'down_edge_too_small';
+  }
+  if (coin === 'BTC' && duration === '5m' && side === 'UP' && score < 15) {
+    return 'btc_up_score_too_small';
+  }
+  return null;
+}
+
 function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, duration: Duration): StrategyProfile {
   const up = { ...strategy.sides.UP };
   const down = { ...strategy.sides.DOWN };
@@ -321,7 +364,7 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
     up.minLeadGapBps += duration === '5m' ? 0.05 : 0.06;
     up.minEdge += duration === '5m' ? 0.015 : 0.006;
     up.minMarketLag += duration === '5m' ? 0.004 : 0.0015;
-    up.maxAsk = Math.max(0.55, up.maxAsk - (duration === '5m' ? 0.05 : 0.03));
+    up.maxAsk = Math.max(0.5, up.maxAsk - (duration === '5m' ? 0.1 : 0.03));
   }
 
   if (coin === 'ETH') {
@@ -330,7 +373,7 @@ function applyCoinStrategyAdjustments(strategy: StrategyProfile, coin: Coin, dur
     up.minLeadGapBps += duration === '5m' ? 0.14 : 0.14;
     up.minEdge += duration === '5m' ? 0.012 : 0.008;
     up.minMarketLag += duration === '5m' ? 0.006 : 0.004;
-    up.maxAsk = Math.max(0.48, up.maxAsk - (duration === '5m' ? 0.12 : 0.06));
+    up.maxAsk = Math.max(0.45, up.maxAsk - (duration === '5m' ? 0.2 : 0.06));
   }
 
   return {

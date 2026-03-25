@@ -8,6 +8,7 @@ import {
   computeLateExitPrice,
   computeTakeProfitPrice,
   evaluateSignal,
+  evaluateLotterySignal,
   toBps,
 } from './strategy-core.js';
 import type { Coin, CryptoPrice, OpenPosition, Side, SignalCandidate, TokenBook, TrackedMarket } from './types.js';
@@ -136,6 +137,9 @@ class StrictBacktester {
     console.log('By side');
     for (const line of summary.bySide) console.log(line);
 
+    console.log('By strategy');
+    for (const line of summary.byStrategy) console.log(line);
+
     console.log('By coin');
     for (const line of summary.byCoin) console.log(line);
 
@@ -152,6 +156,7 @@ class StrictBacktester {
     openUnresolved: number;
     byReason: string[];
     bySide: string[];
+    byStrategy: string[];
     byCoin: string[];
     topRejects: string[];
   } {
@@ -165,6 +170,7 @@ class StrictBacktester {
       openUnresolved: this.openPositions.size,
       byReason: summarize(this.closedTrades, (trade) => trade.closeReason),
       bySide: summarize(this.closedTrades, (trade) => trade.side),
+      byStrategy: summarize(this.closedTrades, (trade) => trade.strategyKind || 'main'),
       byCoin: summarize(this.closedTrades, (trade) => trade.coin),
       topRejects: [...this.rejectReasons.entries()]
         .sort((a, b) => b[1] - a[1])
@@ -274,9 +280,45 @@ class StrictBacktester {
         chainAvailable,
         binancePulseBps: this.getBinancePulseBps(market.coin),
         macroTrendBps: this.getBinanceTrendBps(market.coin),
+        stake: this.config.budget,
       }, this.config.trendBiasBps);
 
       if ('failure' in result) {
+        if (this.config.lotteryEnabled) {
+          const lotteryResult = evaluateLotterySignal({
+            market,
+            strategy,
+            upBook,
+            downBook,
+            baseline: market.baseline,
+            timeRemainingSec,
+            binanceDeltaBps,
+            chainlinkDeltaBps,
+            chainAvailable,
+            binancePulseBps: this.getBinancePulseBps(market.coin),
+            macroTrendBps: this.getBinanceTrendBps(market.coin),
+            stake: this.config.lotteryBudget,
+          }, {
+            enabled: this.config.lotteryEnabled,
+            budget: this.config.lotteryBudget,
+            closeWindowSec: this.config.lotteryCloseWindowSec,
+            minSignalAsk: this.config.lotteryMinSignalAsk,
+            maxSignalAsk: this.config.lotteryMaxSignalAsk,
+            minEdge: this.config.lotteryMinEdge,
+            minLag: this.config.lotteryMinLag,
+            minScore: this.config.lotteryMinScore,
+            minPulseBps: this.config.lotteryMinPulseBps,
+            minTrendBps: this.config.lotteryMinTrendBps,
+            minBinanceDeltaBps: this.config.lotteryMinBinanceDeltaBps,
+            minLeadGapBps: this.config.lotteryMinLeadGapBps,
+            maxTopBookValue: this.config.lotteryMaxTopBookValue,
+            maxSpread: this.config.lotteryMaxSpread,
+          });
+          if ('signal' in lotteryResult) {
+            candidates.push({ market, signal: lotteryResult.signal });
+            continue;
+          }
+        }
         this.rejectCount += 1;
         this.rejectReasons.set(result.failure.reason, (this.rejectReasons.get(result.failure.reason) || 0) + 1);
         continue;
@@ -298,11 +340,11 @@ class StrictBacktester {
   }
 
   private openPosition(market: TrackedMarket, signal: SignalCandidate, now: number): void {
-    if (this.paperBalance < this.config.budget) return;
+    if (this.paperBalance < signal.stake) return;
     const tokenId = signal.side === 'UP' ? market.upTokenId : market.downTokenId;
     const ask = signal.ask;
     if (ask <= 0) return;
-    const shares = this.config.budget / ask;
+    const shares = signal.stake / ask;
     const position: OpenPosition = {
       id: randomUUID(),
       conditionId: market.conditionId,
@@ -315,12 +357,13 @@ class StrictBacktester {
       upTokenId: market.upTokenId,
       downTokenId: market.downTokenId,
       baseline: market.baseline!,
-      stake: this.config.budget,
+      stake: signal.stake,
       entryPrice: ask,
       shares,
       openedAt: now,
       endTime: market.endTime,
       mode: 'paper',
+      strategyKind: signal.strategyKind,
       takeProfitPrice: computeTakeProfitPrice(this.config, market, ask, signal),
       exitFloorPrice: ask * (1 + this.config.forceExitMinRoi),
       minHoldUntil: now + this.config.minHoldSec * 1000,
@@ -328,7 +371,7 @@ class StrictBacktester {
       entryLag: signal.marketLag,
       entryImpliedProb: signal.impliedProb,
     };
-    this.paperBalance -= this.config.budget;
+    this.paperBalance -= signal.stake;
     this.openPositions.set(position.conditionId, position);
     this.signalCount += 1;
   }

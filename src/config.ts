@@ -59,6 +59,26 @@ export interface Config {
   minHoldSec: number;
   forceExitSec: number;
   hardExitSec: number;
+  lotteryEnabled: boolean;
+  lotteryBudget: number;
+  lotteryCloseWindowSec: number;
+  lotteryMinSignalAsk: number;
+  lotteryMaxSignalAsk: number;
+  lotteryMinEdge: number;
+  lotteryMinLag: number;
+  lotteryMinScore: number;
+  lotteryMinPulseBps: number;
+  lotteryMinTrendBps: number;
+  lotteryMinBinanceDeltaBps: number;
+  lotteryMinLeadGapBps: number;
+  lotteryMaxTopBookValue: number;
+  lotteryMaxSpread: number;
+  settlementGuardSec: number;
+  settlementMaxAsk: number;
+  settlementMinEdge: number;
+  settlementMinLag: number;
+  countertrendExitSec: number;
+  countertrendExitBps: number;
   forceExitMinRoi: number;
   strategyProfiles: Record<Duration, StrategyProfile>;
   coins: Coin[];
@@ -138,6 +158,26 @@ export function loadConfig(): Config {
     minHoldSec: parseFloat(get('min-hold-sec', 'MIN_HOLD_SEC', '7')),
     forceExitSec: parseFloat(get('force-exit-sec', 'FORCE_EXIT_SEC', '30')),
     hardExitSec: parseFloat(get('hard-exit-sec', 'HARD_EXIT_SEC', '0')),
+    lotteryEnabled: get('lottery-enabled', 'LOTTERY_ENABLED', 'true') === 'true',
+    lotteryBudget: parseFloat(get('lottery-budget', 'LOTTERY_BUDGET', '1')),
+    lotteryCloseWindowSec: parseFloat(get('lottery-close-window-sec', 'LOTTERY_CLOSE_WINDOW_SEC', '3')),
+    lotteryMinSignalAsk: parseFloat(get('lottery-min-signal-ask', 'LOTTERY_MIN_SIGNAL_ASK', '0.18')),
+    lotteryMaxSignalAsk: parseFloat(get('lottery-max-signal-ask', 'LOTTERY_MAX_SIGNAL_ASK', '0.30')),
+    lotteryMinEdge: parseFloat(get('lottery-min-edge', 'LOTTERY_MIN_EDGE', '0.45')),
+    lotteryMinLag: parseFloat(get('lottery-min-lag', 'LOTTERY_MIN_LAG', '0.45')),
+    lotteryMinScore: parseFloat(get('lottery-min-score', 'LOTTERY_MIN_SCORE', '80')),
+    lotteryMinPulseBps: parseFloat(get('lottery-min-pulse-bps', 'LOTTERY_MIN_PULSE_BPS', '1.0')),
+    lotteryMinTrendBps: parseFloat(get('lottery-min-trend-bps', 'LOTTERY_MIN_TREND_BPS', '20')),
+    lotteryMinBinanceDeltaBps: parseFloat(get('lottery-min-binance-delta-bps', 'LOTTERY_MIN_BINANCE_DELTA_BPS', '3.0')),
+    lotteryMinLeadGapBps: parseFloat(get('lottery-min-lead-gap-bps', 'LOTTERY_MIN_LEAD_GAP_BPS', '4.0')),
+    lotteryMaxTopBookValue: parseFloat(get('lottery-max-top-book-value', 'LOTTERY_MAX_TOP_BOOK_VALUE', '10')),
+    lotteryMaxSpread: parseFloat(get('lottery-max-spread', 'LOTTERY_MAX_SPREAD', '0.18')),
+    settlementGuardSec: parseFloat(get('settlement-guard-sec', 'SETTLEMENT_GUARD_SEC', '8')),
+    settlementMaxAsk: parseFloat(get('settlement-max-ask', 'SETTLEMENT_MAX_ASK', '0.10')),
+    settlementMinEdge: parseFloat(get('settlement-min-edge', 'SETTLEMENT_MIN_EDGE', '0.20')),
+    settlementMinLag: parseFloat(get('settlement-min-lag', 'SETTLEMENT_MIN_LAG', '0.20')),
+    countertrendExitSec: parseFloat(get('countertrend-exit-sec', 'COUNTERTREND_EXIT_SEC', '15')),
+    countertrendExitBps: parseFloat(get('countertrend-exit-bps', 'COUNTERTREND_EXIT_BPS', '2.5')),
     forceExitMinRoi: parseFloat(get('force-exit-min-roi', 'FORCE_EXIT_MIN_ROI', '0.005')),
     strategyProfiles: {
       '5m': loadStrategyProfile('5m', getScoped, getSideScoped, {
