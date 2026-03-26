@@ -103,6 +103,7 @@ class ManagedSocket {
 export class PolymarketRealtime extends EventEmitter {
   private readonly marketSocket: ManagedSocket;
   private readonly marketTokens = new Set<string>();
+  private readonly activeMarketSubscriptions = new Set<string>();
   private readonly chainlinkSymbols = new Set<string>();
   private readonly binanceSymbols = new Set<string>();
   private readonly rtdsBinanceSymbols = new Set<string>();
@@ -122,6 +123,7 @@ export class PolymarketRealtime extends EventEmitter {
       onOpen: () => {
         this.marketReady = true;
         this.marketInitialized = false;
+        this.activeMarketSubscriptions.clear();
         this.marketSocket.setPing(true);
         this.flushMarketSubscriptions();
         this.emit('marketConnected');
@@ -173,6 +175,18 @@ export class PolymarketRealtime extends EventEmitter {
     }
   }
 
+  unsubscribeMarkets(tokenIds: string[]): void {
+    let changed = false;
+    for (const tokenId of tokenIds) {
+      if (this.marketTokens.delete(tokenId)) {
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.flushMarketSubscriptions();
+    }
+  }
+
   subscribeCryptoPrices(symbols: string[]): void {
     let changed = false;
     for (const symbol of symbols) {
@@ -206,21 +220,42 @@ export class PolymarketRealtime extends EventEmitter {
   }
 
   private flushMarketSubscriptions(): void {
-    if (!this.marketReady || this.marketTokens.size === 0) return;
-    const assetIds = [...this.marketTokens];
+    if (!this.marketReady) return;
+    const desired = new Set(this.marketTokens);
+    const additions = [...desired].filter((tokenId) => !this.activeMarketSubscriptions.has(tokenId));
+    const removals = [...this.activeMarketSubscriptions].filter((tokenId) => !desired.has(tokenId));
     if (!this.marketInitialized) {
       this.marketSocket.sendJson({
         type: 'MARKET',
-        assets_ids: assetIds,
+        assets_ids: [...desired],
       });
+      this.activeMarketSubscriptions.clear();
+      for (const tokenId of desired) {
+        this.activeMarketSubscriptions.add(tokenId);
+      }
       this.marketInitialized = true;
       return;
     }
 
-    this.marketSocket.sendJson({
-      operation: 'subscribe',
-      assets_ids: assetIds,
-    });
+    if (removals.length > 0) {
+      this.marketSocket.sendJson({
+        operation: 'unsubscribe',
+        assets_ids: removals,
+      });
+      for (const tokenId of removals) {
+        this.activeMarketSubscriptions.delete(tokenId);
+      }
+    }
+
+    if (additions.length > 0) {
+      this.marketSocket.sendJson({
+        operation: 'subscribe',
+        assets_ids: additions,
+      });
+      for (const tokenId of additions) {
+        this.activeMarketSubscriptions.add(tokenId);
+      }
+    }
   }
 
   private handleMarketMessage(raw: string): void {

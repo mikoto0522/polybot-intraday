@@ -67,6 +67,7 @@ async function main(): Promise<void> {
   await realtime.connect();
   await discoverMarkets();
   const discoverTimer = setInterval(() => void discoverMarkets(), config.scanSec * 1000);
+  const cleanupTimer = setInterval(() => cleanMarkets(), 30_000);
   const baselineTimer = setInterval(() => {
     for (const [coin, tick] of latestBinance.entries()) {
       captureBaselines(coin, tick);
@@ -75,6 +76,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (): Promise<void> => {
     clearInterval(discoverTimer);
+    clearInterval(cleanupTimer);
     clearInterval(baselineTimer);
     realtime.disconnect();
     writer.record('session_end', { markets: markets.size });
@@ -107,6 +109,19 @@ async function discoverMarkets(): Promise<void> {
       if (tick) captureBaselineForMarket(meta, tick);
     } catch (error) {
       console.warn(`discoverMarkets failed for ${slug}:`, error);
+    }
+  }
+}
+
+function cleanMarkets(): void {
+  const now = Date.now();
+  for (const [conditionId, market] of markets) {
+    if (now <= market.endTime + 5 * 60_000) continue;
+    realtime.unsubscribeMarkets([market.upTokenId, market.downTokenId]);
+    markets.delete(conditionId);
+    coinToConditions.get(market.coin)?.delete(conditionId);
+    if ((coinToConditions.get(market.coin)?.size || 0) === 0) {
+      coinToConditions.delete(market.coin);
     }
   }
 }
